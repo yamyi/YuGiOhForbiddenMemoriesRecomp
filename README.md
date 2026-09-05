@@ -422,7 +422,7 @@ checked for this title.
 | `LIFE POINTS` | 1–9999 | 8000 is stock. Applies to both duellists |
 | `SHOW OPPONENT HAND` | on / off | their hand is drawn face-up, like yours |
 | `FORCE FACE UP` | on / off | their set cards play face-up — and stay face-up |
-| `STARCHIPS` | 0–99999 | written straight to your save |
+| `STARCHIPS` | 0–999999 | written straight to your save |
 | `FREE SPENDING` | on / off | purchases succeed, the deduction is undone |
 | `ALL CARDS` | 1, 2 or 3 of each | fills the trunk. Apply with the chest closed |
 

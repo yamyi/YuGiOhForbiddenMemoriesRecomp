@@ -544,7 +544,7 @@ void psx_ygo_cheats_register_menu(void) {
      * never written to the file and never re-applied at startup. */
     s_starchips_row = psx_video_menu_add_number(
         PSX_VM_MENU_CHEATS, "Starchips", "Enter to type a value",
-        0, 99999, /*slider*/0, NULL, 0, starchips_changed);
+        0, 999999, /*slider*/0, NULL, 0, starchips_changed);
 
     h = psx_video_menu_add_option(
         PSX_VM_MENU_CHEATS, "Free spending", ONOFF_HINTS[0],
