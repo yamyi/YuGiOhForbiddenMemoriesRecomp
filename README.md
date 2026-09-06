@@ -12,7 +12,8 @@ beside the FIELD box are this project's, drawn in the game's own art.*
 On top of that sits a set of quality-of-life features built for this game: a
 live duel-rank meter, a fusion assistant that reads your actual hand, a card-drop
 multiplier with a proper results screen, a full **drop-table manager** in its
-own window — view, edit and share every duelist's drops — and a cheat menu.
+own window — view, edit and share every duelist's drops — a **fusion manager**
+for every recipe in the game, and a cheat menu.
 All drawn in the game's own art, all toggleable at runtime.
 
 Built on [PSXRecomp](https://github.com/mstan/psxrecomp).
@@ -64,6 +65,72 @@ the awkward three-step rule the game actually implements.
 | `NUMBERS + INFO` | pick order plus the name of the card it produces |
 
 `VIEW → SUGGEST FUSION BY` chooses **ATTACK** or **DEFENSE**.
+
+### 🔮 Fusion Manager — `VIEW → FUSION MANAGER`
+
+> ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
+> this list and has not been worn in yet. The VIEW menu marks it
+> `— experimental` for the same reason. It cannot hurt your save: every change is a file beside your saves, and `Restore stock` undoes the lot.
+
+The assistant above answers "what can this hand make?" mid-duel. This answers
+the other question — **every fusion in the game, both ways round** — and lets
+you change any of them.
+
+![The Fusion Manager: the card list on the left, FUSES WITH and MADE FROM beside it](docs/screenshots/fusion-manager.png)
+
+Pick a card: **Fuses with** is every partner and what the pair produces, equips
+included with their +500 / +1000 already in the ATK and DEF; **Made from** is
+every pair that produces it. Click a name to walk to that card, `Backspace` to
+walk back.
+
+#### Right-click to edit
+
+![The right-click menu over a fusion row](docs/screenshots/fusion-manager-menu.png)
+
+#### …and pick the card by name, not by number
+
+![The card chooser, filtered to "dragon"](docs/screenshots/fusion-manager-picker.png)
+
+Type `dragon`, take *Blue-eyes Ultimate Dragon* — you never have to know it is
+card 380. `Nothing — remove this fusion` sits at the top, so deleting is the
+same gesture as changing. Adding is two of these in a row: partner, then
+result. Edited rows are marked with what the pair used to make.
+
+#### Every recipe in one list
+
+![The RECIPES view, sorted by the result's attack](docs/screenshots/fusion-manager-recipes.png)
+
+`Recipes` is all 25 146 of them, strongest first, any header sorts. Your edits
+show here too — that top row is one.
+
+#### Starting over
+
+![The confirm dialog for Delete all](docs/screenshots/fusion-manager-confirm.png)
+
+`Delete all…` empties the table, which is where you start if you want to design
+a fusion set from scratch; the right-click menu also clears just one card.
+`Restore stock…` (or `Ctrl+Z`) puts the game's own table back. Both ask first,
+and `Restore stock` copies whatever you had to `fusion_edits_backup.txt` on the
+way out, so a misclick costs one `Import…`.
+
+`Export…` / `Import…` move a recipe list around as plain text — a
+`card1,card2,result` CSV works — and your changes save to `fusion_edits.txt`
+beside your saves as you make them.
+
+#### How it reaches the game
+
+**MODS → FUSION EDITS** replaces the fusion table's **disc sectors**, the same
+trick the card-effects mod uses for the equip and ritual tables, so the game's
+own loader brings your table in and *everything* reads it, the three AI
+planners included. A duel already running is patched in memory too, so a change
+lands without leaving it.
+
+The table is read off the disc rather than out of duel RAM, so the window works
+from boot with no duel — and it shows the fifteen *glitch fusions* the packed
+format produces by accident and the game really does perform. The one hard
+limit is that format's: 65 535 bytes, of which stock uses 65 002, so there is
+room for roughly a hundred new recipes unless you delete some. An edit that
+would not fit is refused and nothing changes.
 
 ### 🎴 Card drops — `MODS → CARD DROPS`
 
@@ -150,6 +217,10 @@ own FREE DUEL screen as you browse it, and keeps them next to your saves.)
 
 ### 🎨 Card Manager — `VIEW → CARD MANAGER`
 
+> ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
+> this list and has not been worn in yet. The VIEW menu marks it
+> `— experimental` for the same reason. It cannot hurt your save: edits live in `cards/`, and `Restore stock` puts a card back.
+
 Change any of the 722 cards: **name, description, face art, duel thumbnail,
 ATK, DEF, both Guardian Stars, type, level, attribute, price and password**.
 The change shows up **everywhere the card is drawn** — the Library page, the
@@ -227,13 +298,15 @@ the opponent's side, the guardian-star wheel, and the granularity of heal
 #### Monster effects
 
 Stock monsters do nothing but fight. The manager's **Effects** tab shows a
-monster's effects as a list of rules, one sentence each:
+monster's effects as a list of rules, one sentence each — here is Time Wizard
+with the one it has in every other game:
 
-```
-When [Summoned face-up]  [50%]        do [Destroy all monsters (Raigeki)]
-When [Summoned face-up]  [Otherwise]  do [Destroy your own, lose half their ATK]
-When [While face-up]                  do [Gain ATK/DEF] [500] per [each Lava Battleguard you control]
-```
+![The Card Manager's Effects tab on Time Wizard: two When/odds/do rules making up its coin flip](docs/screenshots/card-effects-time-wizard.png)
+
+Two lines and it is done: on a 50% roll it Raigekis the opponent's field,
+otherwise it destroys your own monsters and takes half their ATK off your LP.
+The card text underneath is generated from the rules, and
+`Effect text → description` writes it onto the card.
 
 `+ Add effect` adds a line; the x at its end removes it. **When** is one of
 Summoned face-up, Flipped face-up, Destroyed, Attacks, Your turn starts,
@@ -278,9 +351,9 @@ The cast effects are the same list a Magic card can be given (`heal`,
 `dragon_jar`, `stop_defense`, `flip`, `weaken 500`, `swords`, `cursebreaker`,
 `harpie`, `field Yami`), plus `gamble`, Time Wizard's coin: heads destroys
 the opponent's monsters, tails destroys your own and half their total ATK
-comes off your LP, and `destroy_own` / `destroy_own_lp`, which
-destroy your own monsters (the second also costs half their total ATK in
-LP), so the real Time Wizard is `on_summon = 50%: raigeki; else:
+comes off your LP, and `destroy_own` / `destroy_own_lp`, which destroy your
+own monsters (the second also costs half their total ATK in LP) — the two
+lines in the shot above are `on_summon = 50%: raigeki; else:
 destroy_own_lp`. They run through the game's own effect engine, with
 the popup and sound the matching spell would show, the moment the duel is
 idle after the trigger. A monster with any of these draws with the orange
@@ -339,6 +412,10 @@ with what the game shows, the ones that differ are written into that set's
 drops the key again. It shows live.
 
 ### 💬 Dialogue Manager — `VIEW → DIALOGUE MANAGER`
+
+> ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
+> this list and has not been worn in yet. The VIEW menu marks it
+> `— experimental` for the same reason. It cannot hurt your save: translations live in `dialogue/`, and `Back to original` removes them.
 
 For translations: the campaign's dialogue (the story boxes, the duelists'
 lines, the shop and so on: 150 texts) exports to one plain text file and a

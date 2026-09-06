@@ -58,6 +58,34 @@ int psx_fusion_db_stats(uint16_t id, int *atk, int *def, int *type);
  * DEFENCE alike, and successive equips ADD. See psx_fusion_db.c. */
 int psx_fusion_db_equip_bonus(uint16_t equip_id);
 
+/* ---- walking the whole table ----------------------------------------------
+ *
+ * The lookups above answer one question at a time, which is all a duel ever
+ * asks. A browser wants the other direction -- every recipe there is -- and
+ * that needs the record format, which is documented and decoded in
+ * psx_fusion_db.c and should stay there rather than being transcribed a
+ * second time in a UI file.
+ *
+ * Each callback returns non-zero to continue, 0 to stop the walk early. Both
+ * return the number of entries visited, and 0 when the tables are not
+ * resident (a duel is the only time they are -- see the note above). These
+ * are full walks over guest memory: build an index with them, do not call
+ * them per frame. */
+typedef int (*PsxFusionPairFn)(void *ud, uint16_t a, uint16_t b, uint16_t result);
+typedef int (*PsxFusionEquipFn)(void *ud, uint16_t equip, uint16_t monster);
+
+/* Every (a, b) -> result the fusion table holds, each pair once, with
+ * a <= b because that is how the table stores and searches them. What comes
+ * out is exactly what psx_fusion_db_result would answer for those two cards:
+ * padding (the trailing half of an odd group, which decodes to a result of
+ * 0) and entries the lookup can never reach are both dropped -- see the .c
+ * file on the 245 shipping entries of the latter kind. */
+int psx_fusion_db_walk_pairs(PsxFusionPairFn fn, void *ud);
+
+/* Every (equip, monster) membership in the equip table. The monster is the
+ * card that survives; psx_fusion_db_equip_bonus says what it gains. */
+int psx_fusion_db_walk_equips(PsxFusionEquipFn fn, void *ud);
+
 /* ---- debug-server surface ---------------------------------------------- */
 
 /* Table geometry and the validation verdict, for `fusion_db`. Any pointer may

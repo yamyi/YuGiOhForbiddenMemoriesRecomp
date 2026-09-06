@@ -84,7 +84,7 @@ SDL_Renderer *psx_tool_renderer_create(SDL_Window *win, const char *title, int p
 
 int psx_tool_present(SDL_Renderer *ren, SDL_Texture *tex, const void *px, int w, int h, const char *title)
 {
-    static char noted[4][48]; static int nnoted;
+    static char noted[8][48]; static int nnoted;
     int ok = 1;
     const char *step = "";
 #if defined(PSX_SDL3)
@@ -101,7 +101,7 @@ int psx_tool_present(SDL_Renderer *ren, SDL_Texture *tex, const void *px, int w,
     if (!ok) { psx_tool_log("%s: %s failed (%dx%d): %s", title, step, w, h, SDL_GetError()); return 0; }
     /* the first successful present of each window, once */
     for (int i = 0; i < nnoted; i++) if (!strcmp(noted[i], title)) return 1;
-    if (nnoted < 4) { snprintf(noted[nnoted], sizeof noted[nnoted], "%s", title); nnoted++; }
+    if (nnoted < 8) { snprintf(noted[nnoted], sizeof noted[nnoted], "%s", title); nnoted++; }
     psx_tool_log("%s: first frame shown (%dx%d)", title, w, h);
     return 1;
 }
@@ -115,6 +115,6 @@ PSX_MOD_CONSTRUCTOR(psx_tool_window_install)
     const int def = 1;
 #endif
     s_row = psx_video_menu_add_option(PSX_VM_MENU_VIEW, "Tool windows",
-        "How the Card, Drop Table and Dialogue manager windows are drawn. Switch if one shows blank; takes effect when the window is next opened",
+        "How the Card, Drop Table, Dialogue and Fusion manager windows are drawn. Switch if one shows blank; takes effect when the window is next opened",
         CHOICES, 2, "tool_renderer", def, NULL);
 }

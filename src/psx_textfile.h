@@ -12,6 +12,11 @@ extern "C" {
  * code page and fails on a name it cannot spell (an accented user folder);
  * the path goes through _wfopen instead. Elsewhere it is fopen. */
 FILE *psx_fopen_utf8(const char *path, const char *mode);
+/* remove() for a UTF-8 path, for the same reason as the above: on Windows
+ * the ANSI-code-page name is not always spellable, and a delete that quietly
+ * fails leaves the file to be read back on the next launch. Returns 0 on
+ * success, like remove(). */
+int psx_remove_utf8(const char *path);
 /* The whole file as one NUL-terminated UTF-8 string (malloc'd, free it),
  * or NULL. A UTF-8 BOM is dropped; UTF-16 (either byte order, with its
  * BOM -- Notepad's "Unicode") is converted. *len gets the byte length. */
