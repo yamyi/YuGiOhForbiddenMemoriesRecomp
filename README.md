@@ -70,7 +70,8 @@ the awkward three-step rule the game actually implements.
 
 > ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
 > this list and has not been worn in yet. The VIEW menu marks it
-> `— experimental` for the same reason. It cannot hurt your save: every change is a file beside your saves, and `Restore stock` undoes the lot.
+> `— experimental` for the same reason. It cannot hurt your save: every
+> change is a file beside your saves, and `Restore stock` undoes the lot.
 
 The assistant above answers "what can this hand make?" mid-duel. This answers
 the other question — **every fusion in the game, both ways round** — and lets
@@ -219,7 +220,8 @@ own FREE DUEL screen as you browse it, and keeps them next to your saves.)
 
 > ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
 > this list and has not been worn in yet. The VIEW menu marks it
-> `— experimental` for the same reason. It cannot hurt your save: edits live in `cards/`, and `Restore stock` puts a card back.
+> `— experimental` for the same reason. It cannot hurt your save: edits live
+> in `cards/`, and `Restore stock` puts a card back.
 
 Change any of the 722 cards: **name, description, face art, duel thumbnail,
 ATK, DEF, both Guardian Stars, type, level, attribute, price and password**.
@@ -415,7 +417,8 @@ drops the key again. It shows live.
 
 > ⚠️ **Experimental — expect bugs.** This one is much newer than the rest of
 > this list and has not been worn in yet. The VIEW menu marks it
-> `— experimental` for the same reason. It cannot hurt your save: translations live in `dialogue/`, and `Back to original` removes them.
+> `— experimental` for the same reason. It cannot hurt your save:
+> translations live in `dialogue/`, and `Back to original` removes them.
 
 For translations: the campaign's dialogue (the story boxes, the duelists'
 lines, the shop and so on: 150 texts) exports to one plain text file and a
