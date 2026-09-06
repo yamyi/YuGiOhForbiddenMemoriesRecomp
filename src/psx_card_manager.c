@@ -2621,7 +2621,7 @@ static void row_activate(void) { psx_card_manager_open(); }
 
 PSX_MOD_CONSTRUCTOR(psx_card_manager_install)
 {
-    (void)psx_video_menu_add_action(PSX_VM_MENU_VIEW, "Card manager",
+    (void)psx_video_menu_add_action(PSX_VM_MENU_VIEW, "Card manager \xe2\x80\x94 experimental",
                                     "Change a card's name, description, art, frame colour, stats, stars, effects, price and password; export or import them",
                                     row_activate);
     (void)psx_game_add_frame_hook(tick);

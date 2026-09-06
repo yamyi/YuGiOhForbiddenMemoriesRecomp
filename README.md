@@ -12,7 +12,8 @@ beside the FIELD box are this project's, drawn in the game's own art.*
 On top of that sits a set of quality-of-life features built for this game: a
 live duel-rank meter, a fusion assistant that reads your actual hand, a card-drop
 multiplier with a proper results screen, a full **drop-table manager** in its
-own window — view, edit and share every duelist's drops — and a cheat menu.
+own window — view, edit and share every duelist's drops — a **fusion manager**
+for every recipe in the game, and a cheat menu.
 All drawn in the game's own art, all toggleable at runtime.
 
 Built on [PSXRecomp](https://github.com/mstan/psxrecomp).
@@ -64,6 +65,66 @@ the awkward three-step rule the game actually implements.
 | `NUMBERS + INFO` | pick order plus the name of the card it produces |
 
 `VIEW → SUGGEST FUSION BY` chooses **ATTACK** or **DEFENSE**.
+
+### 🔮 Fusion Manager — `VIEW → FUSION MANAGER`
+
+![The Fusion Manager: the card list on the left, FUSES WITH and MADE FROM beside it](docs/screenshots/fusion-manager.png)
+
+The assistant above answers "what can this hand make?" during a duel. This is
+the other question — **every fusion in the game, both ways round** — in a
+second window you can leave open on another monitor while you build a deck.
+
+Pick a card and you get two panels: **Fuses with**, every partner and what the
+pair produces (equips too, with the +500 / +1000 already added to the ATK and
+DEF shown), and **Made from**, every pair that produces it. Click any card name
+in either panel to walk to that card; **Backspace** walks back. `Recipes`
+switches to one flat list of all 25 146 recipes, sorted strongest-first, and
+any column header sorts.
+
+And you can **change any of them**. **Right-click** a row:
+
+| | |
+|---|---|
+| `Change what X + Y makes…` | opens a card list you search by name |
+| `Delete this fusion` | X + Y stops combining |
+| `Add a fusion…` | pick the partner, then pick what they make |
+| `Go to …` | jump to either card |
+
+The chooser is the point: type `blue` and pick *Blue-eyes Ultimate Dragon* off
+the list — you never have to know it is card 380. It also carries a
+*Nothing — remove this fusion* row, so deleting is the same gesture as
+changing. Right-clicking a card in the left-hand list offers to add a fusion
+for it. Edited rows are marked, with the stock result beside them.
+
+There is a typed shortcut too, under *Fuses with*: two card ids and Enter, for
+when you already know them. `Export…` / `Import…` move a recipe list around as
+plain text (a `card1,card2,result` CSV works too), and your changes are saved
+to `fusion_edits.txt` beside your saves as you make them.
+
+`Delete all…` empties the table completely — nothing fuses with anything until
+you add or import some, which is where you start if you want to design a
+fusion set from scratch. The right-click menu also offers to clear just one
+card's fusions. `Restore stock…` (or `Ctrl+Z`) puts the game's own table back
+and switches the override off. Both ask first, and `Restore stock` copies
+whatever you had to `fusion_edits_backup.txt` on the way out, so a misclick
+costs one `Import…`.
+
+**MODS → FUSION EDITS** is the switch that puts them in the game. It works by
+replacing the fusion table's **disc sectors** — the same trick the card-effects
+mod uses for the equip and ritual tables — so the game's own loader brings your
+table in and *everything* reads it, the three AI planners included. A duel
+already running is patched in memory as well, so a change lands without leaving
+it. The one hard limit is the format's: the table must pack into 65 535 bytes
+and stock already uses 65 002, so there is room for roughly a hundred new
+recipes unless you delete some. The title bar shows the tally; an edit that
+would not fit is refused and nothing changes.
+
+There is no baked list here either. The window reads the game's own fusion and
+equip tables **off the disc**, so it needs no duel, works from boot, agrees
+with what you will play by construction — and disagrees with the widely copied
+FAQs in the handful of places those are wrong. It even shows the fifteen
+*glitch fusions* the packed format produces by accident and the game really
+does perform.
 
 ### 🎴 Card drops — `MODS → CARD DROPS`
 

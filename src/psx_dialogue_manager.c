@@ -662,7 +662,7 @@ static void row_activate(void) { psx_dialogue_manager_open(); }
 
 void psx_dialogue_manager_register_menu(void)
 {
-    (void)psx_video_menu_add_action(PSX_VM_MENU_VIEW, "Dialogue manager",
+    (void)psx_video_menu_add_action(PSX_VM_MENU_VIEW, "Dialogue manager \xe2\x80\x94 experimental",
         "Export the campaign's dialogue as plain text for translation, and import it back",
         row_activate);
 }

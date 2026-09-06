@@ -38,11 +38,27 @@
  *     partner2 = ((g[0] << 4) & 0x300) | g[3]
  *     result2  = ((g[0] << 2) & 0x300) | g[4]
  *
- * The guest's loop consumes two entries per group and stops on `count <= 0`
- * AFTER the decrement, so an odd count still tests both halves of the final
- * group. That trailing half is padding — every one of them decodes to a result
- * of 0, which the caller reads as "no fusion" anyway — so scanning it, as the
- * loop below does, matches the game without needing to special-case it.
+ * An ODD count writes only THREE bytes for the final group (g[0..2]) — the
+ * one entry it holds — but the guest's loop consumes two entries per group and
+ * stops on `count <= 0` AFTER the decrement, so it still tests a second half
+ * that is not there: g[3] and g[4] are the FIRST TWO BYTES OF THE NEXT RECORD.
+ *
+ * That is not padding and it does not read as zero. Of the 293 odd records in
+ * the shipping table, 263 decode to a nonzero result; 245 name a partner below
+ * the record's own card id (the lookup sorts its arguments, so that record is
+ * never the one consulted for the pair), 1 is out of range, and 2 name a
+ * partner an earlier entry in the same record already answered. The remaining
+ * FIFTEEN are pairs the game really does fuse and the table never meant to
+ * hold — the "glitch fusions":
+ *
+ *     22+31=72   23+147=4   26+138=4    31+34=84    40+126=4
+ *     45+170=136 61+144=136 64+168=72   66+98=132   74+150=72
+ *     90+130=136 96+231=136 120+166=132 127+128=72  167+225=64
+ *
+ * Copying the guest's loop, as pair_lookup does below, reproduces all fifteen
+ * for free. An ENUMERATION has to be more careful — see the walk near the end
+ * of this file. (Established against the disc bytes and a transcription of the
+ * lookup over all 261003 unordered pairs, 2026-09-05.)
  *
  * ---- func_80019A08: the equip table ---------------------------------------
  *
@@ -73,7 +89,10 @@
  * starts and they read back as solid zeros everywhere else, the same way the
  * rank coefficients psx_rank_logic.c uses do. That is why readiness is probed
  * rather than assumed, and why this module answers only inside a duel -- which
- * is the only place the question is asked anyway.
+ * is the only place the question is asked anyway. The probe leans on the EQUIP
+ * table, not this one: psx_fusion_table.c can legitimately empty the fusion
+ * table, and a probe that treats "empty" as "absent" would report the tables
+ * missing when they are merely bare.
  *
  * Checked against the game itself rather than against a FAQ: five pairs were
  * injected into a live duel's hand records and summoned, and the game produced
@@ -85,6 +104,8 @@
  */
 
 #include "psx_fusion_db.h"
+
+#include <string.h>
 
 #include "mod_plugins.h"
 
@@ -161,14 +182,18 @@ static uint16_t equip_lookup(uint16_t key, uint16_t member)
  * plausible card id and member count. */
 static int validate(void)
 {
-    int live = 0;
     for (int cid = 1; cid <= PSX_FUSION_CARD_ID_MAX; cid++) {
         const uint16_t off = psx_mod_read_half(PSX_FUSION_PAIR_BASE + (uint32_t)cid * 2u);
         if (!off) continue;
         if (off < PSX_FUSION_INDEX_BYTES) return 0;
-        live++;
     }
-    if (live < 256) return 0;
+    /* NOT "and at least 256 cards have a record". That was here to reject
+     * uninitialised RAM, but the equip check below already does that job, and
+     * the population test made a legitimate table look like garbage: the
+     * Fusion Manager can DELETE recipes, and an emptied table has one live
+     * index entry or none. Failing readiness there would have told the duel
+     * assistant the tables were missing rather than empty -- the one wrong
+     * answer this module exists to avoid. */
 
     const uint16_t key = psx_mod_read_half(PSX_FUSION_EQUIP_BASE);
     const uint16_t cnt = psx_mod_read_half(PSX_FUSION_EQUIP_BASE + 2u);
@@ -184,7 +209,12 @@ static int sentinel(void)
         return 0;
     if (psx_mod_read_half(PSX_FUSION_EQUIP_BASE + 2u) - 1u >= PSX_FUSION_CARD_ID_MAX)
         return 0;
-    return psx_mod_read_half(PSX_FUSION_PAIR_BASE + 2u * 2u) >= PSX_FUSION_INDEX_BYTES;
+    /* The fusion index used to be probed here too (card 2's record offset),
+     * which an emptied table zeroes. The equip table is the same 235-sector
+     * duel block, streamed in one stage earlier, so it answers "is the duel
+     * data resident" on its own -- and unlike the fusion index, nothing can
+     * legitimately empty it. */
+    return 1;
 }
 
 int psx_fusion_db_ready(void)
@@ -220,6 +250,100 @@ uint16_t psx_fusion_db_result(uint16_t first, uint16_t second, int *out_kind)
         return second;
     }
     return 0;
+}
+
+/* ---- walking the whole table ---------------------------------------------
+ *
+ * The same decode as pair_lookup and equip_lookup, run over every record
+ * instead of stopping at a match. Kept beside them so the two can never
+ * drift: a change to the record format has to be made once, here.
+ *
+ * The pair walk emits BOTH halves of every group, including the trailing
+ * half of an odd count, exactly as the guest's loop tests both -- and drops
+ * whatever decodes to a zero or out-of-range id, which is what that padding
+ * always decodes to and what the caller would read as "no fusion" anyway. */
+
+int psx_fusion_db_walk_pairs(PsxFusionPairFn fn, void *ud)
+{
+    if (!fn || !psx_fusion_db_ready()) return 0;
+    int seen = 0;
+    for (uint16_t lo = 1; lo <= PSX_FUSION_CARD_ID_MAX; lo++) {
+        const uint32_t off =
+            psx_mod_read_half(PSX_FUSION_PAIR_BASE + (uint32_t)lo * 2u);
+        if (off < PSX_FUSION_INDEX_BYTES) continue;
+
+        uint32_t p = PSX_FUSION_PAIR_BASE + off;
+        int count = psx_mod_read_byte(p);
+        if (count) {
+            p += 1u;
+        } else {
+            count = 511 - psx_mod_read_byte(p + 1u);
+            p += 2u;
+        }
+        if (count <= 0 || count > PSX_FUSION_MAX_PAIRS) continue;
+
+        /* which partners this record has already answered (rule 2 below) */
+        uint8_t seen_partner[(PSX_FUSION_CARD_ID_MAX + 8) / 8];
+        memset(seen_partner, 0, sizeof seen_partner);
+
+        for (; count > 0; count -= 2, p += 5u) {
+            const uint8_t g0 = psx_mod_read_byte(p);
+            const uint16_t half[2][2] = {
+                { (uint16_t)(((g0 << 8) & 0x300) | psx_mod_read_byte(p + 1u)),
+                  (uint16_t)(((g0 << 6) & 0x300) | psx_mod_read_byte(p + 2u)) },
+                { (uint16_t)(((g0 << 4) & 0x300) | psx_mod_read_byte(p + 3u)),
+                  (uint16_t)(((g0 << 2) & 0x300) | psx_mod_read_byte(p + 4u)) },
+            };
+            for (int h = 0; h < 2; h++) {
+                const uint16_t partner = half[h][0], result = half[h][1];
+                if (partner < 1 || partner > PSX_FUSION_CARD_ID_MAX) continue;
+                if (result < 1 || result > PSX_FUSION_CARD_ID_MAX) continue;
+                /* UNREACHABLE ENTRIES. Two rules, both from how the guest
+                 * lookup walks a record — see the header of this file for
+                 * where they come from and what the shipping table holds.
+                 *
+                 * 1. pair_lookup only ever searches the record of min(a, b)
+                 *    for max(a, b), so an entry whose partner is BELOW its
+                 *    own key can never be matched. (partner == key stays:
+                 *    two copies of one card do fuse, and 50 such entries are
+                 *    real.) This is what removes the bulk of the trailing
+                 *    halves that spill into the next record.
+                 * 2. The loop returns on its FIRST match, so a second entry
+                 *    naming a partner already seen in this record is dead.
+                 *
+                 * What survives is exactly what the game answers, the
+                 * fifteen glitch fusions included: 25146 pairs, against the
+                 * 25131 the table intends. */
+                if (partner < lo) continue;
+                if (seen_partner[partner >> 3] & (uint8_t)(1u << (partner & 7))) continue;
+                seen_partner[partner >> 3] |= (uint8_t)(1u << (partner & 7));
+                seen++;
+                if (!fn(ud, lo, partner, result)) return seen;
+            }
+        }
+    }
+    return seen;
+}
+
+int psx_fusion_db_walk_equips(PsxFusionEquipFn fn, void *ud)
+{
+    if (!fn || !psx_fusion_db_ready()) return 0;
+    int seen = 0;
+    uint32_t p = PSX_FUSION_EQUIP_BASE;
+    for (int g = 0; g < PSX_FUSION_MAX_EQUIP_GROUPS; g++) {
+        const uint16_t key = psx_mod_read_half(p);
+        if (key == 0) break;
+        const uint16_t count = psx_mod_read_half(p + 2u);
+        p += 4u;
+        for (uint16_t i = 0; i < count; i++) {
+            const uint16_t member = psx_mod_read_half(p + (uint32_t)i * 2u);
+            if (member < 1 || member > PSX_FUSION_CARD_ID_MAX) continue;
+            seen++;
+            if (!fn(ud, key, member)) return seen;
+        }
+        p += (uint32_t)count * 2u;
+    }
+    return seen;
 }
 
 /* ---- the card table -------------------------------------------------------

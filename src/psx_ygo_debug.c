@@ -40,6 +40,8 @@
 #include "psx_card_texts.h"
 #include "psx_dialogue.h"
 #include "psx_dialogue_manager.h"
+#include "psx_fusion_manager.h"
+#include "psx_fusion_table.h"
 
 /* rank_meter_tune — nudge the duel-rank meter's layout while the game runs.
  * {"cmd":"rank_meter_tune","letter_x":N,"letter_y":N,"gap":N,"dx":N,"dy":N}
@@ -208,6 +210,97 @@ static void handle_fusion_list(int id, const char *json)
     body[0] = 0;
     psx_fusion_assist_list_json(body, sizeof body);
     send_fmt("{\"id\":%d,\"ok\":true,%s}", id, body);
+}
+
+/* fusion_manager -- the window: state, open/close (open:1/0), pick a view
+ * (view:0 by card, 1 recipes), select a card (card:id), sort (sort/desc,
+ * applied to whichever table the view shows), filter (search), synthetic
+ * click/move/key/text, a canvas dump (shot: path, binary PPM) and an export
+ * (export: path, edits_only:1 for just the changes) or an import
+ * (import: path). Editing: {"b":partner,"result":id} changes a pair of the
+ * selected card ("a" names another), result 0 removes it; "undo_all":1 drops
+ * every edit and puts the stock table back ("restore":1 is the same thing);
+ * "clear_all":1 empties the table entirely and "clear_card":id empties one
+ * card's share of it; "confirm":1/2/0 raises, accepts or dismisses whichever
+ * dialog is up; "apply":1/0 installs or removes the sector override. Add
+ * "card_json":1 for the selected card's two panels,
+ * which works with the window closed. */
+static void handle_fusion_manager(int id, const char *json)
+{
+    char buf[6144], s[128], path[1024], msg[1400];
+    const int open = json_get_int(json, "open", -1);
+    if (open >= 0) psx_fusion_manager_request_open(open);
+    const char *search = json_get_str(json, "search", s, sizeof s);
+    psx_fusion_manager_set(json_get_int(json, "view", -1),
+                           json_get_int(json, "card", -1),
+                           json_get_int(json, "sort", -1),
+                           json_get_int(json, "desc", -1),
+                           search);
+    if (json_get_int(json, "undo_all", 0) || json_get_int(json, "restore", 0)) psx_fusion_manager_undo_all();
+    if (json_get_int(json, "clear_all", 0) && !psx_fusion_manager_clear_all(msg, sizeof msg)) { send_err(id, msg); return; }
+    {
+        const int cc = json_get_int(json, "clear_card", -1);
+        if (cc >= 0 && !psx_fusion_manager_clear_card(cc, msg, sizeof msg)) { send_err(id, msg); return; }
+    }
+    {   /* the confirm dialog: 1 raise, 2 confirm, 0 cancel */
+        const int ask = json_get_int(json, "confirm", -1);
+        if (ask >= 0) psx_fusion_manager_confirm_restore(ask);
+    }
+    if (json_get_int(json, "apply", -1) == 1)      { if (!psx_fusion_table_apply(msg, sizeof msg)) { send_err(id, msg); return; } }
+    else if (json_get_int(json, "apply", -1) == 0) psx_fusion_table_revert();
+    {   /* edit: "a" defaults to the selected card, "result" 0 removes */
+        const int eb = json_get_int(json, "b", -1), er = json_get_int(json, "result", -1);
+        if (eb >= 1 && er >= 0) {
+            if (!psx_fusion_manager_edit(json_get_int(json, "a", -1), eb, er, msg, sizeof msg)) { send_err(id, msg); return; }
+        }
+    }
+    if (json_get_str(json, "import", path, sizeof path)) {
+        const int ok = psx_fusion_manager_import(path, msg, sizeof msg);
+        for (char *q = msg; *q; q++) if (*q == '"') *q = '\'';
+        send_fmt("{\"id\":%d,\"ok\":%s,\"msg\":\"%s\"}", id, ok ? "true" : "false", msg);
+        return;
+    }
+    if (json_get_str(json, "export", path, sizeof path)) {
+        const int ok = json_get_int(json, "edits_only", 0)
+                     ? psx_fusion_table_export(path, 1, msg, sizeof msg)
+                     : psx_fusion_manager_export(path, msg, sizeof msg);
+        for (char *q = msg; *q; q++) if (*q == '"') *q = '\'';
+        send_fmt("{\"id\":%d,\"ok\":%s,\"msg\":\"%s\"}", id, ok ? "true" : "false", msg);
+        return;
+    }
+    const int x = json_get_int(json, "x", -1), y = json_get_int(json, "y", -1);
+    if (x >= 0 && y >= 0) {
+        const int moved = json_get_int(json, "move", 0);
+        const int dbl = json_get_int(json, "double", 0);
+        const int ok = moved ? psx_fusion_manager_move(x, y)
+                     : dbl   ? psx_fusion_manager_double_click(x, y)
+                             : psx_fusion_manager_click(x, y, json_get_int(json, "button", 0));
+        if (!ok) { send_err(id, "window is closed"); return; }
+    }
+    const int k = json_get_int(json, "keycode", 0);
+    if (k && !psx_fusion_manager_inject_key(k)) { send_err(id, "window is closed"); return; }
+    if (json_get_str(json, "text", s, sizeof s) && !psx_fusion_manager_inject_text(s)) { send_err(id, "window is closed"); return; }
+    if (json_get_str(json, "shot", path, sizeof path) && !psx_fusion_manager_shot(path)) { send_err(id, "window is closed"); return; }
+    if (json_get_int(json, "card_json", 0)) {
+        /* a card can have hundreds of partners (Baby Dragon has 318), so this
+         * one does not fit the stack buffer the rest of the command uses */
+        enum { CARD_JSON_CAP = 192u * 1024u };
+        char *big = (char *)malloc(CARD_JSON_CAP);
+        if (!big) { send_err(id, "oom"); return; }
+        if (!psx_fusion_manager_card_json(big, CARD_JSON_CAP, json_get_int(json, "card", -1))) {
+            free(big);
+            send_err(id, "state too long");
+            return;
+        }
+        send_fmt("{\"id\":%d,\"ok\":true,%s}", id, big);
+        free(big);
+        return;
+    }
+    if (!psx_fusion_manager_state_json(buf, sizeof buf)) {
+        send_err(id, "state too long");
+        return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf);
 }
 
 static void handle_fusion_overlay(int id, const char *json)
@@ -957,6 +1050,7 @@ PSX_MOD_CONSTRUCTOR(psx_ygo_debug_install) {
     (void)psx_debug_add_command("fusion_chain",      handle_fusion_chain);
     (void)psx_debug_add_command("fusion_best",       handle_fusion_best);
     (void)psx_debug_add_command("fusion_overlay",    handle_fusion_overlay);
+    (void)psx_debug_add_command("fusion_manager",    handle_fusion_manager);
 #ifndef PSX_NO_DEBUG_TOOLS
     (void)psx_debug_add_command("name_probe",        handle_name_probe);
 #endif

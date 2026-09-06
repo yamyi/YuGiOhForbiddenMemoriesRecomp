@@ -1,5 +1,5 @@
 /* psx_tool_window.h -- what the tool windows (Card Manager, Drop Table
- * Manager, Dialogue Manager) share: which renderer draws them, a checked
+ * Manager, Dialogue Manager, Fusion Manager) share: which renderer draws them, a checked
  * present, and a log file for the machines we cannot look at.
  *
  * Renderer choice, in order: PSX_TOOL_RENDERER=software|accelerated|<driver>
