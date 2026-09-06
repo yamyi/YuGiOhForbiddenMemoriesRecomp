@@ -649,7 +649,7 @@ int psx_fusion_table_save(char *err, unsigned cap)
 {
     char path[1200];
     edits_path(path, sizeof path);
-    if (!s_edit_n && !s_wipe) { remove(path); if (err) snprintf(err, cap, "No edits to save"); return 1; }
+    if (!s_edit_n && !s_wipe) { psx_remove_utf8(path); if (err) snprintf(err, cap, "No edits to save"); return 1; }
     return psx_fusion_table_export(path, 1, err, cap);
 }
 
@@ -834,7 +834,7 @@ int psx_fusion_table_restore_stock(char *err, unsigned cap)
     (void)rebuild(NULL, 0);
     psx_fusion_table_revert();
     edits_path(path, sizeof path);
-    remove(path);
+    psx_remove_utf8(path);
     psx_tool_log("Fusion table: restored stock, %d edit%s dropped%s",
                  had, had == 1 ? "" : "s", saved ? " (backed up)" : "");
     if (err) {

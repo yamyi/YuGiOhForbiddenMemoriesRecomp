@@ -1,4 +1,5 @@
 #include "psx_textfile.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
@@ -17,6 +18,16 @@ FILE *psx_fopen_utf8(const char *path, const char *mode)
     }
 #endif
     return fopen(path, mode);
+}
+
+int psx_remove_utf8(const char *path)
+{
+#ifdef _WIN32
+    wchar_t wpath[2048];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof wpath / sizeof wpath[0])) > 0)
+        return _wremove(wpath);
+#endif
+    return remove(path);
 }
 
 /* one UTF-16 code unit stream -> UTF-8 */
