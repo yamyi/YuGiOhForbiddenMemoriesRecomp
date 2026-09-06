@@ -2032,7 +2032,7 @@ static void row_activate(void) { psx_fusion_manager_open(); }
 void psx_fusion_manager_register_menu(void)
 {
     (void)psx_video_menu_add_action(PSX_VM_MENU_VIEW, "Fusion manager \xe2\x80\x94 experimental",
-        "Every fusion in the game, both ways round " S_DASH " and change any of them",
+        "EXPERIMENTAL, may have bugs. Every fusion in the game, both ways round " S_DASH " and change any of them",
         row_activate);
 }
 
