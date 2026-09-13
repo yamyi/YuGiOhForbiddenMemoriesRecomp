@@ -342,10 +342,33 @@ typedef struct {
 typedef struct {
     int      file;              /* index into s_file */
     int      src_x, src_y;      /* which page of that file this entry is */
-    int      w, h;              /* replacement pixels */
+    int      w, h;              /* replacement pixels, the TRUE crop size --
+                                 * what the shader samples relative to */
     int      scale;
-    int      atlas_x, atlas_y;
-    uint8_t *rgba;              /* owned */
+    int      atlas_x, atlas_y;  /* the crop's own origin in the atlas, PAST
+                                 * the 1px padding border below -- this is
+                                 * what TexPackHit and the shader use */
+    /* The rect actually allocated and uploaded to the atlas texture: the
+     * crop plus a 1px border on every side, replicating that side's own
+     * edge pixels (pad_x/pad_y = atlas_x/atlas_y - 1, pad_w/pad_h = w/h +
+     * 2). Bilinear's 2x2 tap footprint can only reach half a texel past
+     * the sample point, so a primitive sampling right at this crop's true
+     * edge overshoots into a pixel that is an EXACT COPY of the edge it
+     * came from, not a seam and not whatever is packed next to it in the
+     * atlas -- replacing the inset-clamp this project tried three times
+     * (2026-09-12/13) to make correctly account for both an atlas
+     * neighbour AND a sibling primitive sampling the same entry's own
+     * interior. Built 2026-09-13 after the clamp approach turned out unable
+     * to satisfy both at once: sized to the whole entry, it let two
+     * primitives sampling adjacent sub-rectangles of ONE entry (Simon's
+     * eyebrows and moustache) each lose their own outermost half-texel at
+     * the shared edge; sized to one primitive's own uv footprint (v_limits),
+     * it correctly avoided that but re-opened bleeding between two
+     * DIFFERENT entries meant to tile edge-to-edge (a compounded
+     * background's own halves). Padding fixes both, unconditionally, with
+     * no clamp needed at all. */
+    int      pad_x, pad_y, pad_w, pad_h;
+    uint8_t *rgba;              /* owned, pad_w x pad_h (the padded image) */
     int      pending;           /* backend has not uploaded it yet */
 } TpEntry;
 
@@ -1386,8 +1409,10 @@ static int entry_load(int file, const TpAsset *a)
     const int aw = a->w * scale, ah = a->h * scale;
     const int sx = a->src_x * scale, sy = a->src_y * scale;
     stbi_uc *atlas_px;
+    int atlas_is_stbi = 0;   /* atlas_px needs stbi_image_free, not free() */
     if (sx == 0 && sy == 0 && aw == pw && ah == ph) {
         atlas_px = page;                 /* whole image is the page */
+        atlas_is_stbi = !a->retile;      /* page IS px when there was no retile */
     } else {
         if (sx + aw > pw || sy + ah > ph) {
             if (a->retile) free(page); else stbi_image_free(page);
@@ -1406,10 +1431,36 @@ static int entry_load(int file, const TpAsset *a)
         if (a->retile) free(page); else stbi_image_free(page);
     }
 
+    /* 3. pad with a 1px border replicating each edge -- see TpEntry's own
+     * comment on pad_x/y/w/h for why this exists instead of a sampling
+     * clamp. */
+    const int paw = aw + 2, pah = ah + 2;
+    uint8_t *padded = (uint8_t *)malloc((size_t)paw * (size_t)pah * 4u);
+    if (!padded) {
+        if (atlas_is_stbi) stbi_image_free(atlas_px); else free(atlas_px);
+        return -1;
+    }
+    for (int y = 0; y < ah; y++)
+        memcpy(padded + ((size_t)(y + 1) * paw + 1) * 4u,
+               atlas_px + (size_t)y * aw * 4u, (size_t)aw * 4u);
+    if (atlas_is_stbi) stbi_image_free(atlas_px); else free(atlas_px);
+    for (int y = 1; y <= ah; y++) {          /* left/right edges */
+        memcpy(padded + ((size_t)y * paw + 0) * 4u,
+               padded + ((size_t)y * paw + 1) * 4u, 4u);
+        memcpy(padded + ((size_t)y * paw + (size_t)(paw - 1)) * 4u,
+               padded + ((size_t)y * paw + (size_t)(paw - 2)) * 4u, 4u);
+    }
+    /* top/bottom rows, corners included -- copied whole from the interior
+     * row next to them, which already has its own left/right edge filled
+     * in above. */
+    memcpy(padded, padded + (size_t)paw * 4u, (size_t)paw * 4u);
+    memcpy(padded + (size_t)(pah - 1) * paw * 4u,
+           padded + (size_t)(pah - 2) * paw * 4u, (size_t)paw * 4u);
+
     int ax, ay;
-    if (!atlas_place(aw, ah, &ax, &ay)) {
+    if (!atlas_place(paw, pah, &ax, &ay)) {
         s_stat_atlas_full++;
-        free(atlas_px);
+        free(padded);
         return -1;
     }
 
@@ -1420,9 +1471,10 @@ static int entry_load(int file, const TpAsset *a)
     e->w = aw;
     e->h = ah;
     e->scale = scale;
-    e->atlas_x = ax;
-    e->atlas_y = ay;
-    e->rgba = atlas_px;
+    e->atlas_x = ax + 1;
+    e->atlas_y = ay + 1;
+    e->pad_x = ax; e->pad_y = ay; e->pad_w = paw; e->pad_h = pah;
+    e->rgba = padded;
     e->pending = 1;
     return s_entry_n++;
 }
@@ -1433,10 +1485,10 @@ int texpack_take_pending(int *x, int *y, int *w, int *h, const uint8_t **rgba)
         if (!s_entry[i].pending)
             continue;
         s_entry[i].pending = 0;
-        *x = s_entry[i].atlas_x;
-        *y = s_entry[i].atlas_y;
-        *w = s_entry[i].w;
-        *h = s_entry[i].h;
+        *x = s_entry[i].pad_x;
+        *y = s_entry[i].pad_y;
+        *w = s_entry[i].pad_w;
+        *h = s_entry[i].pad_h;
         *rgba = s_entry[i].rgba;
         return 1;
     }
@@ -1457,6 +1509,15 @@ typedef struct {
     int        base_x, base_y, depth, clut_x, clut_y;
     int        lim[4];
     int        hit;
+    int        asset;   /* s_asset[] index that resolved this slot, -1 if hit==0.
+                         * Kept so a CACHE-HIT reuse can still be diagnosed --
+                         * see drawlog_add()'s call sites below: without this, a
+                         * draw that resolves once and then stays cache-warm for
+                         * the rest of the session (a static portrait's own base
+                         * layer, typically) never appears in texpack_draw_log
+                         * again after its first frame, which hid exactly the
+                         * draw needed to root-cause the campaign_characters
+                         * mouth-hole investigation (2026-09-13). */
     TexPackHit out;
 } TpCache;
 
@@ -1660,8 +1721,101 @@ int texpack_capture_get(int i, TexPackCapture *out)
     return 1;
 }
 
+/* ---- draw-time diagnostic ring --------------------------------------------
+ *
+ * Built 2026-09-13 to answer a specific class of question without guessing
+ * at shader math: for a MULTI-primitive tiled asset (several small quads
+ * sharing one page -- campaign_characters' face/eyes/mouth chunks, a tiled
+ * background's strips), which region/asset did a given small draw resolve
+ * against, what was its OWN uv footprint (lim) and texture window (twin),
+ * and what placement (org_u/org_v/scale) did that produce? Recorded once per
+ * distinct resolve (the TpCache short-circuit above means a repeated draw of
+ * an unchanged primitive does not re-log), which is enough to catch what a
+ * specific on-screen quad is doing after reproducing it live. */
+#define TP_DRAWLOG_CAP 64
+typedef struct {
+    char name[TP_NAME_MAX];
+    int base_x, base_y, depth, clut_x, clut_y;
+    int lim[4];
+    int twin[4];
+    int dst[4];    /* screen bbox {x0,y0,x1,y1}, or all -1 when the caller passed none */
+    int region_x, region_y, region_w, region_h;  /* -1 when not re-derived (cached) */
+    float org_u, org_v, scale;
+    float atlas_x, atlas_y;   /* this entry's own origin in the atlas, for
+                               * cross-checking against gl_atlas_peek */
+    int mode;
+    int cached;   /* 1 = logged from a warm TpCache slot, not a fresh resolve */
+} TpDrawLogEntry;
+static TpDrawLogEntry s_drawlog[TP_DRAWLOG_CAP];
+static uint64_t       s_drawlog_n;   /* monotonic; index with % TP_DRAWLOG_CAP */
+
+/* region_x/y/w/h pass -1 when unavailable (a cache-hit call site has no live
+ * TpRegion* to re-read -- see TpCache's own `asset` field comment for why
+ * this needs to be logged at all: a draw that resolves once and stays
+ * cache-warm for the rest of the session otherwise never appears here
+ * again after its first frame. dst is the primitive's own screen bbox
+ * (added alongside `asset`, same day, same reason): matching a visible
+ * screen position back to the asset/region that drew it doesn't otherwise
+ * cross from "what's on screen" to "what this file thinks is happening". */
+static void drawlog_add(const char *name,
+                        int region_x, int region_y, int region_w, int region_h,
+                        int base_x, int base_y, int depth, int clut_x, int clut_y,
+                        const int lim[4], const int twin[4], const int dst[4],
+                        const TexPackHit *hit, int cached)
+{
+    TpDrawLogEntry *e = &s_drawlog[s_drawlog_n % TP_DRAWLOG_CAP];
+    snprintf(e->name, sizeof e->name, "%s", name);
+    e->base_x = base_x; e->base_y = base_y; e->depth = depth;
+    e->clut_x = clut_x; e->clut_y = clut_y;
+    for (int i = 0; i < 4; i++) {
+        e->lim[i]  = lim  ? lim[i]  : 0;
+        e->twin[i] = twin ? twin[i] : 0;
+        e->dst[i]  = dst  ? dst[i]  : -1;
+    }
+    e->region_x = region_x; e->region_y = region_y;
+    e->region_w = region_w; e->region_h = region_h;
+    e->org_u = hit->org_u; e->org_v = hit->org_v; e->scale = hit->scale;
+    e->atlas_x = hit->atlas_x; e->atlas_y = hit->atlas_y;
+    e->mode = hit->mode;
+    e->cached = cached;
+    s_drawlog_n++;
+}
+
+/* newest-last window, same shape as this title's other *_json ring dumps. */
+int texpack_draw_log_json(char *out, unsigned cap)
+{
+    unsigned have = s_drawlog_n < (uint64_t)TP_DRAWLOG_CAP
+                        ? (unsigned)s_drawlog_n : (unsigned)TP_DRAWLOG_CAP;
+    unsigned n = (unsigned)snprintf(out, cap, "\"entries\":[");
+    if (n >= cap) return 0;
+    for (unsigned i = have; i > 0; i--) {
+        const TpDrawLogEntry *e =
+            &s_drawlog[(s_drawlog_n - (uint64_t)i) % TP_DRAWLOG_CAP];
+        unsigned k = (unsigned)snprintf(out + n, cap - n,
+            "%s{\"name\":\"%s\",\"base_x\":%d,\"base_y\":%d,\"depth\":%d,"
+            "\"clut_x\":%d,\"clut_y\":%d,\"lim\":[%d,%d,%d,%d],"
+            "\"twin\":[%d,%d,%d,%d],\"dst\":[%d,%d,%d,%d],"
+            "\"region\":[%d,%d,%d,%d],"
+            "\"org_u\":%.1f,\"org_v\":%.1f,\"scale\":%.1f,"
+            "\"atlas_x\":%.1f,\"atlas_y\":%.1f,\"mode\":%d,"
+            "\"cached\":%d}",
+            (i == have) ? "" : ",", e->name, e->base_x, e->base_y, e->depth,
+            e->clut_x, e->clut_y, e->lim[0], e->lim[1], e->lim[2], e->lim[3],
+            e->twin[0], e->twin[1], e->twin[2], e->twin[3],
+            e->dst[0], e->dst[1], e->dst[2], e->dst[3],
+            e->region_x, e->region_y, e->region_w, e->region_h,
+            (double)e->org_u, (double)e->org_v, (double)e->scale,
+            (double)e->atlas_x, (double)e->atlas_y, e->mode,
+            e->cached);
+        if (k >= cap - n) return 0;
+        n += k;
+    }
+    return (unsigned)snprintf(out + n, cap - n, "]") < cap - n;
+}
+
 int texpack_on_draw(int base_x, int base_y, int depth,
                     int clut_x, int clut_y, const int lim[4],
+                    const int twin[4],
                     const int dst[4], TexPackHit *out)
 {
     if (!s_enabled || s_pack_active < 0 || !s_region_n || !lim)
@@ -1675,8 +1829,20 @@ int texpack_on_draw(int base_x, int base_y, int depth,
         c->depth == depth && c->clut_x == clut_x && c->clut_y == clut_y &&
         c->lim[0] == lim[0] && c->lim[1] == lim[1] &&
         c->lim[2] == lim[2] && c->lim[3] == lim[3]) {
-        if (c->hit)
+        if (c->hit) {
             *out = c->out;
+            /* Logged from the cache too, or a draw that resolves once and
+             * then stays cache-warm all session (a static portrait's own
+             * base layer, typically) never appears in texpack_draw_log
+             * again after its first frame -- which hid exactly the draw
+             * needed to root-cause the campaign_characters mouth-hole
+             * investigation (2026-09-13). No live TpRegion* to re-read
+             * here, hence the -1,-1,-1,-1. */
+            const char *nm = (c->asset >= 0 && c->asset < s_asset_n)
+                                  ? s_asset[c->asset].name : "?";
+            drawlog_add(nm, -1, -1, -1, -1, base_x, base_y, depth, clut_x, clut_y,
+                       lim, twin, dst, &c->out, 1);
+        }
         return c->hit;
     }
 
@@ -1686,6 +1852,7 @@ int texpack_on_draw(int base_x, int base_y, int depth,
     c->lim[0] = lim[0]; c->lim[1] = lim[1];
     c->lim[2] = lim[2]; c->lim[3] = lim[3];
     c->hit = 0;
+    c->asset = -1;
 
     /* texels per VRAM word at this depth */
     const int tpw = (depth == 0) ? 4 : (depth == 1) ? 2 : 1;
@@ -1714,6 +1881,7 @@ int texpack_on_draw(int base_x, int base_y, int depth,
 
     const TpRegion *r = &s_region[found];
     TpAsset *a = &s_asset[r->asset];
+    c->asset = r->asset;   /* so a later cache-hit reuse can still be logged */
 
     /* The containment test above is purely geometric: it asks whether this
      * primitive's WORD-space sample rectangle falls inside the region, not
@@ -1841,6 +2009,9 @@ int texpack_on_draw(int base_x, int base_y, int depth,
                      * tinted, since -1 is non-zero in C. Only tint==1 counts. */
                     c->out.mode    = spal ? 0 : (a->tint > 0 ? 1 : 0);
                     c->hit = 1;
+                    drawlog_add(a->name, r->x, r->y, r->w, r->h,
+                               base_x, base_y, depth, clut_x, clut_y,
+                               lim, twin, dst, &c->out, 0);
                     *out = c->out;
                     return 1;
                 }
@@ -1898,6 +2069,9 @@ int texpack_on_draw(int base_x, int base_y, int depth,
     c->out.scale   = (float)e->scale;
     c->out.mode    = mode;
     c->hit = 1;
+    drawlog_add(a->name, r->x, r->y, r->w, r->h,
+               base_x, base_y, depth, clut_x, clut_y,
+               lim, twin, dst, &c->out, 0);
     *out = c->out;
     return 1;
 }

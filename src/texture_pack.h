@@ -345,10 +345,25 @@ typedef struct {
  * each distinct asset. */
 /* `dst` is the primitive's SCREEN bounding box {x0,y0,x1,y1}, or NULL. It is
  * not used for resolving -- it is recorded, so an export can reassemble a
- * sheet the way the screen shows it instead of the way VRAM stores it. */
+ * sheet the way the screen shows it instead of the way VRAM stores it.
+ *
+ * `twin` is the GP0 texture window active for this primitive -- {mask_x,
+ * mask_y, off_x, off_y}, VRAM-word units, or NULL when none is set. Not used
+ * for resolving either (matching is by content hash, same as `dst`'s own
+ * note above) -- recorded purely for texpack_draw_log_json() so a draw that
+ * uses window-based frame selection (a common cheap PS1 sprite-animation
+ * trick: one quad, a moving window, no new geometry) can be told apart from
+ * one that is not, without guessing from the shader side. */
 int texpack_on_draw(int base_x, int base_y, int depth,
                     int clut_x, int clut_y, const int lim[4],
+                    const int twin[4],
                     const int dst[4], TexPackHit *out);
+
+/* Diagnostic ring of the last TP_DRAWLOG_CAP distinct resolves (see
+ * texture_pack.c) -- which asset/region a draw matched, its own uv bound and
+ * texture window, and the resulting placement. Fragment form, same as this
+ * file's other *_json calls (embed into a caller's own {..}). */
+int texpack_draw_log_json(char *out, unsigned cap);
 
 /* A VRAM-to-VRAM copy (GP0(80h)) never goes through texpack_on_draw -- it
  * moves raw words, not a textured primitive, so it has no depth/clut/uv to

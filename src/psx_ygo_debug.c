@@ -43,6 +43,7 @@
 #include "psx_card_manager.h"
 #include "psx_card_shop.h"
 #include "psx_card_packs.h"
+#include "texture_pack.h"
 #include "psx_card_effects.h"
 #include "psx_card_password_view.h"
 #include "psx_card_share.h"
@@ -646,6 +647,32 @@ static void handle_drop_missing_state(int id, const char *json)
     if (!psx_drop_missing_state_json(buf, sizeof(buf))) {
         send_err(id, "state unavailable"); return;
     }
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf);
+}
+
+/* texpack_state — overall texpack counters, unresolved shapes and the
+ * VRAM-to-VRAM copy log (texpack_note_copy(), wired to a real call site
+ * 2026-09-13). Was defined in texture_pack.c from early in the HD
+ * texture-pack work but never actually exposed to a debug command. */
+static void handle_texpack_state(int id, const char *json)
+{
+    (void)json;
+    static char buf[32u * 1024u];
+    if (!texpack_state_json(buf, sizeof buf)) { send_err(id, "state too long"); return; }
+    send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf);
+}
+
+/* texpack_draw_log — the last TP_DRAWLOG_CAP distinct HD-replacement resolves
+ * (which asset/region matched a draw, its own uv bound and texture window,
+ * the resulting placement). Built 2026-09-13 to root-cause a seam/hole on a
+ * multi-primitive tiled asset (campaign_characters' composited face/eyes/
+ * mouth chunks) without guessing at shader math -- reproduce the draw live,
+ * then read back exactly what texpack_on_draw() decided for it. */
+static void handle_texpack_draw_log(int id, const char *json)
+{
+    (void)json;
+    static char buf[32u * 1024u];
+    if (!texpack_draw_log_json(buf, sizeof buf)) { send_err(id, "state too long"); return; }
     send_fmt("{\"id\":%d,\"ok\":true,%s}", id, buf);
 }
 
@@ -1719,6 +1746,8 @@ PSX_MOD_CONSTRUCTOR(psx_ygo_debug_install) {
     (void)psx_debug_add_command("drop_viewer",       handle_drop_viewer);
     (void)psx_debug_add_command("drop_viewer_set",   handle_drop_viewer_set);
     (void)psx_debug_add_command("drop_viewer_click", handle_drop_viewer_click);
+    (void)psx_debug_add_command("texpack_draw_log",   handle_texpack_draw_log);
+    (void)psx_debug_add_command("texpack_state",      handle_texpack_state);
     (void)psx_debug_add_command("card_packs",         handle_card_packs);
     (void)psx_debug_add_command("card_description_validate", handle_card_description_validate);
     (void)psx_debug_add_command("card_packs_reload",  handle_card_packs_reload);
