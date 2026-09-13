@@ -267,6 +267,12 @@ void psx_card_packs_art_path(int id, int kind, char *out, unsigned cap);
  * card's art through the Card Manager and through the Asset Manager land on
  * the one file. */
 void psx_card_packs_art_dest_path(int id, int kind, char *out, unsigned cap);
+/* Player-triggered, one-time move of every legacy per-card picture (from
+ * before 2026-09-13, when pictures lived in this card's own folder) into the
+ * active pack's shared folder above -- see psx_asset_manager.c's "Migrate
+ * assets" button, the only caller. Skips a card whose shared slot is already
+ * occupied. Both out-params are optional. */
+void psx_card_packs_migrate_legacy_art(int *out_migrated, int *out_skipped);
 /* The player's OWN set, <player-data>/cards, whichever set is live. What a
  * share file or a revert must address: the Dev Card Effects set is a
  * shipped mod and is never what a player means by "my cards". */

@@ -34,6 +34,7 @@
 #include "host_osd.h"
 #include "mod_plugins.h"
 #include "psx_card_packs.h"
+#include "texture_pack.h"          /* texpack_request_reload() after reset-all */
 #include "psx_card_share.h"
 #include "psx_card_shop.h"
 #include "psx_card_drops.h"
@@ -623,10 +624,28 @@ int psx_mod_package_reset_all(char *msg, unsigned cap)
                 char pth[1400]; snprintf(pth, sizeof pth, "%s/%s", d, files4[j]);
                 if (file_exists(pth)) { any = 1; (void)psx_remove_utf8(pth); }
             }
+            /* The three pictures (art/thumb/title) moved to the active pack's
+             * shared Textures folder in 2026-09-13 and are not per-set, unlike
+             * card.ini above -- clearing only the old per-card path (just
+             * done) left a player's custom art/thumb/title in place after a
+             * "reset all", which is not what "back to stock" promises.
+             * psx_card_packs_art_path() reports wherever a picture actually
+             * is right now (the shared copy, or a not-yet-migrated legacy
+             * one already caught above); clear that too. */
+            for (int j = 1; j < 4; j++) {
+                char shared[1400];
+                psx_card_packs_art_path(id, j, shared, sizeof shared);
+                if (file_exists(shared)) { any = 1; (void)psx_remove_utf8(shared); }
+            }
             if (any) { (void)rmdir(d); cards++; }
         }
     }
     psx_card_packs_reload(0);
+    /* Same gap psx_card_share_import() had: psx_card_packs_reload() re-reads
+     * disc-side bookkeeping but never touches texpack's OWN file listing, so
+     * the raw VRAM injector would otherwise keep showing an art/thumb/title
+     * file this reset just deleted until something else triggered a rescan. */
+    texpack_request_reload();
     for (int d = 0; d < PSX_DROP_DB_DUELISTS; d++) {
         if (psx_drop_edits_count(d)) { psx_drop_edits_clear(d); drops++; }
         if (psx_drop_edits_reward(d, NULL)) { psx_drop_edits_reward_set(d, 0, 0); drops++; }

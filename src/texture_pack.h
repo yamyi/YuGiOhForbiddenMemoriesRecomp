@@ -65,6 +65,20 @@
 #define TEXTURE_PACK_H
 
 #include <stdint.h>
+#include "gpu_texpack_hooks.h"   /* GpuTexpackHit -- TexPackHit is an alias of
+                                  * it below. The runtime (gpu_gl_renderer.c)
+                                  * is what actually consumes this shape (its
+                                  * fields become shader uniforms), so it owns
+                                  * the type; this file just names its own
+                                  * TexPackHit the same thing so every existing
+                                  * use here keeps compiling unchanged. See
+                                  * gpu_texpack_hooks.h's own header comment
+                                  * for why this moved (the runtime used to
+                                  * #include this header directly and name
+                                  * texpack_on_draw() and friends, which made
+                                  * any build without src/texture_pack.c fail
+                                  * to link -- found reviewing the paired PR,
+                                  * 2026-09-14). */
 
 #ifdef __cplusplus
 extern "C" {
@@ -284,23 +298,6 @@ void        texpack_active_dir(char *out, unsigned cap);
 void        texpack_set_enabled(int on);
 int         texpack_enabled(void);
 
-/* "Is there a replacement ready for this asset right now?" -- 1 only when
- * replacement is enabled, a pack is active, and that pack actually ships the
- * file. A title uses this to stand its OWN art-replacement paths down when the
- * pack already covers an asset, so the two do not fight over the same pixels. */
-int         texpack_has_replacement(const char *name);
-
-/* Bumped only when the active pack's file list is (re)scanned -- activation,
- * a manual reload, or (once one exists) the pack directory itself changing --
- * never by ordinary draws or uploads. A title that gates its OWN replacement
- * path on texpack_has_replacement() at load time (see that function's own
- * comment) can be asked before the pack has finished its first scan, and a
- * per-file mtime watch never re-asks once its own file hasn't changed. Poll
- * this alongside that watch and re-run the query when it changes, so "the
- * pack only became ready a moment after I first checked" self-corrects
- * instead of sticking with a stale false forever. */
-unsigned    texpack_file_scan_generation(void);
-
 /* ---- VRAM observation (called by the renderer facade) -------------------- */
 
 /* One completed CPU->VRAM transfer. The rectangle becomes a candidate source
@@ -318,22 +315,24 @@ void texpack_invalidate_all(void);
 /* Where a primitive should read its replacement, in atlas texels. A
  * primitive's uv is relative to its texture page while the replacement is
  * relative to the source region, so the shader needs the region's origin
- * expressed in this primitive's own texel space to line them up. */
-typedef struct {
-    float atlas_x, atlas_y;   /* the replacement's top-left in the atlas */
-    float org_u, org_v;       /* the source region's origin, in prim texels */
-    float scale;              /* replacement pixels per source texel (>= 1) */
-    /* How the replacement is to be drawn:
-     *   0 FLAT     the file's own RGB. HD colour, but the palette is frozen.
-     *   1 TINTED   the game's CLUT colour, the file's alpha. Correct under
-     *              every palette, but only cutout edges can sharpen.
-     *   2 INDEXED  the file holds INDICES, not colour, and the shader looks
-     *              them up in the game's CLUT per pixel -- what the console
-     *              itself does, just at the replacement's resolution. Sharp
-     *              AND correct under every palette; limited to the palette's
-     *              own colours. */
-    int   mode;
-} TexPackHit;
+ * expressed in this primitive's own texel space to line them up.
+ *
+ * The real definition is GpuTexpackHit (gpu_texpack_hooks.h, runtime-owned
+ * -- see this file's own top-of-file comment on why). Field meanings,
+ * unchanged by the move:
+ *   atlas_x, atlas_y   the replacement's top-left in the atlas
+ *   org_u, org_v       the source region's origin, in prim texels
+ *   scale              replacement pixels per source texel (>= 1)
+ *   mode               how the replacement is to be drawn:
+ *     0 FLAT     the file's own RGB. HD colour, but the palette is frozen.
+ *     1 TINTED   the game's CLUT colour, the file's alpha. Correct under
+ *                every palette, but only cutout edges can sharpen.
+ *     2 INDEXED  the file holds INDICES, not colour, and the shader looks
+ *                them up in the game's CLUT per pixel -- what the console
+ *                itself does, just at the replacement's resolution. Sharp
+ *                AND correct under every palette; limited to the palette's
+ *                own colours. */
+typedef GpuTexpackHit TexPackHit;
 
 /* Resolve one textured primitive: 1 and fills `out` when a replacement
  * applies, 0 when the stock path should draw.

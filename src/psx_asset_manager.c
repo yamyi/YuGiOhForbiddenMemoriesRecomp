@@ -53,16 +53,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#ifdef _WIN32
-#include <direct.h>
-#include <windows.h>
-#define AM_MKDIR(p) _mkdir(p)
-#else
-#include <dirent.h>
-#include <unistd.h>
-#define AM_MKDIR(p) mkdir((p), 0755)
-#endif
+#include "psx_textfile.h"      /* psx_fopen_utf8/psx_mkdir_utf8/psx_path_exists_utf8/
+                                * psx_dir_list_utf8: the pack folder or Windows username
+                                * may have an accent the ANSI-code-page APIs cannot spell */
+#define AM_MKDIR(p) psx_mkdir_utf8(p)
 
 #include "psx_tool_window.h"
 #include "psx_sdl.h"
@@ -75,6 +69,8 @@
 #include "psx_texture_export.h"
 #include "psx_wa_catalog.h"
 #include "texture_pack.h"
+#include "psx_card_packs.h"        /* psx_card_packs_migrate_legacy_art() */
+#include "psx_cpu_data.h"          /* psx_cpu_migrate_legacy_portraits() */
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -487,10 +483,10 @@ static int  s_region_n;
 static uint32_t *s_pack_region_argb;
 static int       s_pack_region_ok, s_pack_region_w, s_pack_region_h;
 
-enum { BTN_FOLDER = 0, BTN_UPLOAD, BTN_OPEN_FOLDER, BTN_EXPORT, BTN_EXPORT_ALL, BTN_COUNT };
+enum { BTN_FOLDER = 0, BTN_UPLOAD, BTN_OPEN_FOLDER, BTN_EXPORT, BTN_EXPORT_ALL, BTN_MIGRATE, BTN_COUNT };
 static const char *const BTN_LABEL[BTN_COUNT] = {
     "Choose pack folder" S_ELLIP, "Upload" S_ELLIP, "Open folder",
-    "Export" S_ELLIP, "Export all" S_ELLIP
+    "Export" S_ELLIP, "Export all" S_ELLIP, "Migrate assets"
 };
 
 /* the file/folder dialog's answer, consumed on the emulation thread */
@@ -531,7 +527,7 @@ static void say(const char *m)
 
 static unsigned char *read_file(const char *path, long *size)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = psx_fopen_utf8(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -611,33 +607,21 @@ static int load_png_native(const char *path, uint32_t **out_argb, int *w, int *h
  * name, so the count and the composed preview disagreed -- caught on
  * duel_fields/0_top, whose Pack panel was blank under that misleading
  * count). Any future underscore-prefixed helper file gets the same pass. */
+static void scan_region_files_entry(const char *name, int is_dir, void *ctx)
+{
+    (void)ctx;
+    if (is_dir || s_region_n >= REGION_FILES_MAX || name[0] == '_')
+        return;
+    const char *ext = strrchr(name, '.');
+    if (!ext || strcmp(ext, ".png") != 0)
+        return;
+    snprintf(s_region_files[s_region_n++], sizeof s_region_files[0], "%s", name);
+}
+
 static void scan_region_files(const char *dir)
 {
     s_region_n = 0;
-#if defined(_WIN32)
-    char glob[1200];
-    snprintf(glob, sizeof glob, "%s\\*.png", dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(glob, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        if (s_region_n >= REGION_FILES_MAX) break;
-        if (fd.cFileName[0] == '_') continue;
-        snprintf(s_region_files[s_region_n++], sizeof s_region_files[0], "%s", fd.cFileName);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-#else
-    DIR *dp = opendir(dir);
-    if (!dp) return;
-    struct dirent *de;
-    while ((de = readdir(dp)) != NULL && s_region_n < REGION_FILES_MAX) {
-        if (de->d_name[0] == '_') continue;
-        const char *ext = strrchr(de->d_name, '.');
-        if (!ext || strcmp(ext, ".png") != 0) continue;
-        snprintf(s_region_files[s_region_n++], sizeof s_region_files[0], "%s", de->d_name);
-    }
-    closedir(dp);
-#endif
+    psx_dir_list_utf8(dir, scan_region_files_entry, NULL);
 }
 
 /* Reassembles this multi-region asset's exported files into one picture at
@@ -897,7 +881,8 @@ static void draw_bar(void)
         else if (b == BTN_UPLOAD) enabled = s_pack_root[0] && has_asset;
         else if (b == BTN_OPEN_FOLDER) enabled = s_pack_root[0] && s_asset_sel >= 0;
         else if (b == BTN_EXPORT) enabled = s_asset_sel >= 0 && !s_export_all_active;
-        else /* BTN_EXPORT_ALL */ enabled = !s_export_all_active;
+        else if (b == BTN_EXPORT_ALL) enabled = !s_export_all_active;
+        else /* BTN_MIGRATE */ enabled = s_pack_root[0] != 0;
         draw_button(&L->btn[b], BTN_LABEL[b], b == s_hover_btn_cache && enabled, enabled);
     }
 }
@@ -949,16 +934,15 @@ static void draw_assets(void)
          * textures will actually produce something right now, grey-hollow
          * means the screen that draws it still needs a visit first. */
         char path[1200], rel[128];
-        struct stat st;
         int have;
         asset_rel_path(&s_assets[ai], rel, sizeof rel);
         if (s_assets[ai].multi_region) {
             char dir[1200];
             asset_dir(s_pack_root[0] ? s_pack_root : ".", rel, dir, sizeof dir);
-            have = s_pack_root[0] && stat(dir, &st) == 0;
+            have = s_pack_root[0] && psx_path_exists_utf8(dir);
         } else {
             asset_path(s_pack_root[0] ? s_pack_root : ".", rel, path, sizeof path);
-            have = s_pack_root[0] && stat(path, &st) == 0;
+            have = s_pack_root[0] && psx_path_exists_utf8(path);
         }
         uint32_t dot_col = have ? COL_HAVE : COL_MISS;
         int ready = have;
@@ -1149,7 +1133,7 @@ static int save_upload(const char *src_path, const char *dst_path, int tinted)
         long sz;
         unsigned char *bytes = read_file(src_path, &sz);
         if (!bytes) return 0;
-        FILE *f = fopen(dst_path, "wb");
+        FILE *f = psx_fopen_utf8(dst_path, "wb");
         const int ok = f && fwrite(bytes, 1, (size_t)sz, f) == (size_t)sz;
         if (f) fclose(f);
         free(bytes);
@@ -1249,6 +1233,42 @@ static void do_export_all(void)
 #endif
 }
 
+/* Player-triggered, one-time move of every legacy picture (per-card
+ * art/thumb/title, per-duelist portrait -- both from before 2026-09-13,
+ * when they lived in their own folders instead of this shared one) into the
+ * active pack's folder. See psx_card_packs_migrate_legacy_art()'s and
+ * psx_cpu_migrate_legacy_portraits()'s own comments for why this is a
+ * button rather than something that runs at every boot: reviewing the
+ * paired PR found that anyone with existing custom cards or portraits lost
+ * them silently on update, with no fallback and no message. Requests a
+ * texpack reload afterward so the raw VRAM injector notices the
+ * newly-arrived files immediately -- the same call install_pick()
+ * (psx_card_manager.c) makes after a single upload. */
+static void do_migrate_assets(void)
+{
+    if (!s_pack_root[0]) { say("Choose a pack folder first"); return; }
+    int cards_migrated = 0, cards_skipped = 0;
+    int portraits_migrated = 0, portraits_skipped = 0;
+    psx_card_packs_migrate_legacy_art(&cards_migrated, &cards_skipped);
+    psx_cpu_migrate_legacy_portraits(&portraits_migrated, &portraits_skipped);
+    const int total = cards_migrated + portraits_migrated;
+    const int skipped = cards_skipped + portraits_skipped;
+    if (total > 0) {
+        texpack_set_active_dir(s_pack_root);
+        texpack_request_reload();
+    }
+    char msg[256];
+    if (total == 0 && skipped == 0)
+        snprintf(msg, sizeof msg, "Migrate assets: nothing to migrate");
+    else if (skipped == 0)
+        snprintf(msg, sizeof msg, "Migrated %d picture%s", total, total == 1 ? "" : "s");
+    else
+        snprintf(msg, sizeof msg,
+                 "Migrated %d picture%s (%d already had a newer upload, left alone)",
+                 total, total == 1 ? "" : "s", skipped);
+    say(msg);
+}
+
 static void run_button(int b)
 {
     if (b == BTN_FOLDER) do_choose_folder();
@@ -1256,6 +1276,7 @@ static void run_button(int b)
     else if (b == BTN_OPEN_FOLDER) do_open_folder();
     else if (b == BTN_EXPORT) do_export_one();
     else if (b == BTN_EXPORT_ALL) do_export_all();
+    else if (b == BTN_MIGRATE) do_migrate_assets();
 }
 
 static void select_cat(int i)
@@ -1345,16 +1366,33 @@ void psx_asset_manager_open(void)
     build_catalog();
     /* Always the active pack's own folder -- never left empty waiting for a
      * pack to happen to already be active, which is what let this window and
-     * the folder card art/CPU portraits actually read from drift apart. Also
-     * arms it as the runtime's ACTUAL active pack (texture_pack.c no longer
-     * does this by itself at boot -- see discover_packs()'s comment on why),
-     * so opening this window is what turns raw VRAM replacement on for it,
-     * not something every launch pays a directory scan for regardless of
-     * whether this window is ever opened. */
+     * the folder card art/CPU portraits actually read from drift apart.
+     *
+     * This is NOT what turns HD replacement on: build_catalog() above (also
+     * called, unconditionally, from the start hook that runs at boot -- see
+     * its own comment) already activates pack 0 the moment one exists, and
+     * discover_packs() registers <player-data>/textures as pack 0
+     * unconditionally, so every launch pays that directory scan whether or
+     * not this window is ever opened. What this branch actually does is the
+     * reverse: pull the ALREADY-active pack's path into this window's own
+     * s_pack_root, which starts each open with no memory of the last one, so
+     * the folder box and the runtime's own idea of "the pack" cannot drift
+     * apart the first time this is read. texpack_set_active_dir() here is
+     * mostly a no-op (same index it already was), kept for the one case
+     * where nothing activated yet (no player-data directory at boot). */
     if (!s_pack_root[0]) {
         texpack_active_dir(s_pack_root, (unsigned)sizeof s_pack_root);
         texpack_set_active_dir(s_pack_root);
     }
+    /* Rescan every time this window opens, not just the first time a pack
+     * becomes active: texpack_set_active_dir() above is a no-op when the
+     * pack was already active, so without this, files someone dropped into
+     * the folder by hand (or a pack switched to and back from elsewhere)
+     * would not show up here until the next unrelated reload. Cheap either
+     * way -- reload_pack_files() only re-decodes what actually gets drawn,
+     * see its own comment -- and harmless when texpack_set_active_dir() just
+     * did a synchronous reload of its own a line above. */
+    texpack_request_reload();
     s_win = psx_fm_editor_acquire(PSX_FM_PAGE_TEXTURES, WIN_W, WIN_H);
     if (!s_win) { host_osd_push("Textures: no window", 2000); return; }
     gl_capture();
@@ -1530,6 +1568,11 @@ static void tick(void)
                 say(msg);
                 s_preview_asset = -1;   /* force a reread */
                 refresh_preview();
+                /* Without this the new file sits on disk unread until
+                 * whatever else next requests a reload (or a restart) --
+                 * refresh_preview() above only rereads THIS window's own
+                 * thumbnail, not the runtime's resident atlas entry. */
+                texpack_request_reload();
             } else if (r < 0) {
                 say("Could not write into the pack folder");
             } else {
@@ -1632,7 +1675,7 @@ int psx_asset_manager_shot(const char *path)
 {
     if (!s_win || !s_px || !path) return 0;
     if (s_dirty) { draw(); s_dirty = 0; }
-    FILE *f = fopen(path, "wb");
+    FILE *f = psx_fopen_utf8(path, "wb");
     if (!f) return 0;
     fprintf(f, "P6\n%d %d\n255\n", s_w, s_h);
     for (int i = 0; i < s_w * s_h; i++) {

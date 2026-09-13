@@ -28,6 +28,7 @@ extern void starvation_watchdog_heartbeat(void);
 #include "mod_plugins.h"
 #include "psx_card_packs.h"
 #include "psx_drop_edits.h"
+#include "texture_pack.h"          /* texpack_request_reload() after import */
 
 /* zlib, which the runtime links for its save states, inflates hand-made
  * (deflated) archives. stb_image's decoder was tried first and rejects the
@@ -102,7 +103,14 @@ static int card_edited(int id, const char *dir)
 {
     if (!s_own_only) return psx_card_packs_get(id, NULL) != 0;
     for (int j = 0; j < 4; j++) {
-        char p[1200]; snprintf(p, sizeof p, "%s/%d/%s", dir, id, CARD_FILES[j]);
+        char p[1200];
+        /* Same split as the export loop below: card.ini is still per-card,
+         * the three pictures live in the shared pack folder now. Checking
+         * only the old per-card path here missed a card whose sole edit was
+         * a picture, and card_edited() gating the export loop meant such a
+         * card was skipped entirely, not just missing its picture. */
+        if (j == 0) snprintf(p, sizeof p, "%s/%d/%s", dir, id, CARD_FILES[j]);
+        else        psx_card_packs_art_path(id, j, p, sizeof p);
         FILE *f = psx_fopen_utf8(p, "rb");
         if (f) { fclose(f); return 1; }
     }
@@ -207,7 +215,20 @@ int psx_card_share_export(const char *path, char *msg, unsigned cap)
     int files = 0;
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < 4; j++) {
-            char p[1200]; snprintf(p, sizeof p, "%s/%d/%s", dir, ids[i], CARD_FILES[j]);
+            char p[1200];
+            /* card.ini (j==0) is still this card's own folder; the three
+             * pictures (j==1..3) moved to the active pack's shared Textures
+             * folder in 2026-09-13 -- psx_card_packs_art_path() is the one
+             * place that knows where a picture actually is now (including
+             * falling back to a not-yet-migrated legacy file, see its own
+             * comment). Reading straight from `dir` here, unchanged, is what
+             * made an exported card share silently lose its art: reviewing
+             * the paired PR. The ARCHIVE entry name keeps the old
+             * "cards/<id>/<file>" shape regardless -- that is the on-disk
+             * .ygocards format, not a filesystem path, and changing it would
+             * break every share already out there. */
+            if (j == 0) snprintf(p, sizeof p, "%s/%d/%s", dir, ids[i], CARD_FILES[j]);
+            else        psx_card_packs_art_path(ids[i], j, p, sizeof p);
             long sz; unsigned char *b = read_file(p, &sz);
             if (!b) continue;
             char name[64]; snprintf(name, sizeof name, "cards/%d/%s", ids[i], CARD_FILES[j]);
@@ -503,10 +524,19 @@ int psx_card_share_import(const char *path, char *msg, unsigned cap)
     }
     char dir[1024]; cards_dir(dir, sizeof dir);
     MKDIR(dir);
-    /* the file's cards replace the player's: clear those folders first */
+    /* the file's cards replace the player's: clear those first. card.ini
+     * (j==0) is still this card's own folder; the three pictures moved to
+     * the active pack's shared Textures folder in 2026-09-13 --
+     * psx_card_packs_art_path() reports wherever a picture actually is right
+     * now (the shared copy, or a not-yet-migrated legacy one), so removing
+     * THAT path is what "replace this card's picture" means today. */
     for (int i = 0; i < info.card_n; i++) {
         char p[1200];
-        for (int j = 0; j < 4; j++) { snprintf(p, sizeof p, "%s/%d/%s", dir, info.card_ids[i], CARD_FILES[j]); remove(p); }
+        for (int j = 0; j < 4; j++) {
+            if (j == 0) snprintf(p, sizeof p, "%s/%d/%s", dir, info.card_ids[i], CARD_FILES[j]);
+            else        psx_card_packs_art_path(info.card_ids[i], j, p, sizeof p);
+            remove(p);
+        }
         snprintf(p, sizeof p, "%s/%d", dir, info.card_ids[i]);
         MKDIR(p);
     }
@@ -516,7 +546,16 @@ int psx_card_share_import(const char *path, char *msg, unsigned cap)
         if (parse_card_name(ents[i].name, &id, &file)) {
             long sz; unsigned char *d = zip_extract(b, n, &ents[i], &sz);
             if (!d) { bad++; continue; }
-            char p[1200]; snprintf(p, sizeof p, "%s/%d/%s", dir, id, CARD_FILES[file]);
+            char p[1200];
+            /* Same split as everywhere else in this file: card.ini writes to
+             * the per-card folder, the three pictures write to the active
+             * pack's shared folder (creating it as needed) so an imported
+             * card's art shows up through the Asset Manager too, not just
+             * this window -- writing it to `dir` here, unchanged, is what
+             * made an imported card share's art land where nothing reads it.
+             * Reviewing the paired PR. */
+            if (file == 0) snprintf(p, sizeof p, "%s/%d/%s", dir, id, CARD_FILES[file]);
+            else           psx_card_packs_art_dest_path(id, file, p, sizeof p);
             if (write_file(p, d, (size_t)sz)) files++; else bad++;
             if ((files % 100) == 0) starvation_watchdog_heartbeat();
             free(d);
@@ -528,6 +567,12 @@ int psx_card_share_import(const char *path, char *msg, unsigned cap)
     starvation_watchdog_heartbeat();
     psx_tool_log("card share: %d files written at %u ms, reloading", files, (unsigned)SDL_GetTicks());
     psx_card_packs_reload(0);
+    /* psx_card_packs_reload() re-reads disc-side bookkeeping (have_art/
+     * thumb/title) but never touches texpack's OWN file listing -- the raw
+     * VRAM injector would not otherwise notice a picture this import just
+     * wrote into the shared pack folder until something else (opening the
+     * Textures tab, say) happened to trigger a rescan. */
+    texpack_request_reload();
     psx_tool_log("card share: reload done at %u ms", (unsigned)SDL_GetTicks());
     if (msg) snprintf(msg, cap, "Imported %d card%s (%d file%s)%s%s", info.card_n, info.card_n == 1 ? "" : "s", files, files == 1 ? "" : "s",
                       info.has_drops ? " and the drop table edits" : "", bad ? "; some entries were damaged and skipped" : "");

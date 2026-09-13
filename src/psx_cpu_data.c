@@ -495,6 +495,62 @@ static void portrait_path_dest(int duelist, char *out, size_t cap)
     if (slash) { *slash = 0; psx_texture_export_mkdir_p(dir); }
 }
 
+/* ---- legacy portrait migration ---------------------------------------------
+ * Same story as psx_card_packs.c's own migrate_legacy_art(): before
+ * 2026-09-13 a duelist's portrait lived at portrait_png() (duelists/<id>/),
+ * and reading it stopped when portraits moved to the shared pack folder,
+ * silently dropping anyone's existing custom portraits. Not an automatic
+ * fallback (a stat() per duelist on every lookup forever, for players who
+ * mostly have nothing to migrate) -- a player-triggered, one-time move via
+ * the Textures tab's "Migrate assets" button (psx_asset_manager.c), the
+ * only caller. */
+static int move_file(const char *from, const char *to)
+{
+    char dir[1200]; snprintf(dir, sizeof dir, "%s", to);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = 0; psx_texture_export_mkdir_p(dir); }
+    if (rename(from, to) == 0) return 1;
+    /* Different filesystems/drives: rename() can't cross them, so fall back
+     * to a plain read + write + delete of the original. */
+    FILE *in = psx_fopen_utf8(from, "rb");
+    if (!in) return 0;
+    fseek(in, 0, SEEK_END);
+    const long size = ftell(in);
+    fseek(in, 0, SEEK_SET);
+    if (size <= 0 || size > (32L << 20)) { fclose(in); return 0; }
+    unsigned char *data = (unsigned char *)malloc((size_t)size);
+    if (!data || fread(data, 1, (size_t)size, in) != (size_t)size) { free(data); fclose(in); return 0; }
+    fclose(in);
+    FILE *out = psx_fopen_utf8(to, "wb");
+    if (!out) { free(data); return 0; }
+    const int ok = fwrite(data, 1, (size_t)size, out) == (size_t)size;
+    fclose(out);
+    free(data);
+    if (!ok) { remove(to); return 0; }
+    remove(from);
+    return 1;
+}
+
+/* Moves every legacy per-duelist portrait that still exists into the active
+ * pack's shared folder, skipping (and counting separately) any duelist whose
+ * shared slot is already occupied. */
+void psx_cpu_migrate_legacy_portraits(int *out_migrated, int *out_skipped)
+{
+    psx_cpu_ensure_loaded();
+    int migrated = 0, skipped = 0;
+    for (int d = 0; d < NDUEL; d++) {
+        char legacy[1200];
+        portrait_png(d, legacy, sizeof legacy);
+        if (file_mtime(legacy) == 0) continue;
+        char shared[1200];
+        portrait_png_shared(d, shared, sizeof shared);
+        if (file_mtime(shared) != 0) { skipped++; continue; }
+        if (move_file(legacy, shared)) migrated++;
+    }
+    if (out_migrated) *out_migrated = migrated;
+    if (out_skipped) *out_skipped = skipped;
+}
+
 int psx_cpu_portrait_edited(int duelist)
 {
     psx_cpu_ensure_loaded();

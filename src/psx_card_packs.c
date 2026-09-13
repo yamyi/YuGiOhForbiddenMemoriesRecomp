@@ -784,6 +784,69 @@ static unsigned char *read_file(const char *path, long *size)
     return buf;
 }
 
+/* ---- legacy per-card picture migration ------------------------------------
+ *
+ * Before 2026-09-13 art.png/thumb.png/title.png lived in this card's own
+ * folder (pack_path()); reviewing the paired PR flagged that anyone who had
+ * already made custom cards lost that art on update with no message, since
+ * nothing here reads the old location any more. Not fixed as an automatic
+ * fallback baked into psx_card_packs_art_path() -- that would cost a second
+ * stat() per picture per card on every lookup forever, for every player,
+ * most of whom have nothing to migrate. Fixed instead as a player-triggered,
+ * one-time move: the Textures tab's "Migrate assets" button
+ * (psx_asset_manager.c) calls this once, on request. */
+static const char *const ART_NAME[4] = { "", "art.png", "thumb.png", "title.png" };
+
+static void art_legacy_path(int id, int kind, char *out, size_t cap)
+{
+    pack_path(id, ART_NAME[kind], out, cap);
+}
+
+/* rename() first -- atomic, and the common case since both paths are under
+ * the same player-data tree -- falling back to copy+delete only when that
+ * fails (genuinely different filesystems/drives). Creates `to`'s directory
+ * as needed. Returns 1 on success. */
+static int move_file(const char *from, const char *to)
+{
+    char dir[1200]; snprintf(dir, sizeof dir, "%s", to);
+    char *slash = strrchr(dir, '/');
+    if (slash) { *slash = 0; psx_texture_export_mkdir_p(dir); }
+    if (rename(from, to) == 0) return 1;
+    long size = 0;
+    unsigned char *data = read_file(from, &size);
+    if (!data) return 0;
+    FILE *out = psx_fopen_utf8(to, "wb");
+    if (!out) { free(data); return 0; }
+    const int ok = fwrite(data, 1, (size_t)size, out) == (size_t)size;
+    fclose(out);
+    free(data);
+    if (!ok) { remove(to); return 0; }
+    remove(from);
+    return 1;
+}
+
+/* Moves every legacy per-card picture that still exists into the active
+ * pack's shared folder, skipping (and counting separately) any card whose
+ * shared slot is ALREADY occupied -- a newer upload there always wins over
+ * an old file this never touches or overwrites. */
+void psx_card_packs_migrate_legacy_art(int *out_migrated, int *out_skipped)
+{
+    int migrated = 0, skipped = 0;
+    for (int id = 1; id <= CARD_COUNT; id++) {
+        for (int kind = 1; kind <= 3; kind++) {
+            char legacy[1200];
+            art_legacy_path(id, kind, legacy, sizeof legacy);
+            if (file_mtime(legacy) == 0) continue;
+            char shared[1200];
+            art_shared_path(id, kind, shared, sizeof shared);
+            if (file_mtime(shared) != 0) { skipped++; continue; }
+            if (move_file(legacy, shared)) migrated++;
+        }
+    }
+    if (out_migrated) *out_migrated = migrated;
+    if (out_skipped) *out_skipped = skipped;
+}
+
 /* ---- PNG -> RGB at a fixed size --------------------------------------------
  * Box-filtered when shrinking, nearest when enlarging: card art is usually
  * a bigger scan, and averaging is what keeps it from sparkling. */
@@ -2295,27 +2358,37 @@ static void card_packs_tick(void)
             if (s_packs[id] && s_packs[id]->present && mtimes_changed(s_packs[id])) { load_pack(id); changed = 1; }
         if (changed || s_pw_dirty) rebuild_password_table();
     }
-    /* Hot reload, brand-new cards: a small batch every frame instead of the
-     * whole table on a timer. A card whose only content is a shared-pack
+    /* Hot reload, brand-new cards: a small batch every few frames instead of
+     * the whole table on a timer. A card whose only content is a shared-pack
      * upload (no card.ini, no folder of its own) has no Pack struct at all
      * until this notices it -- doing that check for all 722 cards at once,
      * even on a once-a-second timer, is a burst of 700+ stat() calls in a
      * single frame that got worse the longer a player had been testing (more
-     * files on disk to stat). NOTICE_PER_TICK cards a frame instead spreads
-     * the exact same total cost thin enough that no one frame notices it,
-     * while still covering the whole table roughly twice a second at 60 fps. */
+     * files on disk to stat). NOTICE_PER_TICK cards every NOTICE_PERIOD
+     * frames instead spreads the exact same per-card cost thin enough that
+     * no one frame notices it.
+     *
+     * Checking every card costs up to 4 stat()s (the per-card folder, then
+     * up to three shared-folder picture paths) -- at NOTICE_PER_TICK=8 that
+     * is up to 32 stat()s a frame, ~1900/s at 60 fps forever, for an event
+     * (a file dropped in by hand outside the game) that is rare once a
+     * session settles in. NOTICE_PERIOD spaces those batches out instead of
+     * running one every frame: still ~480 stat()s/s worst case, and a full
+     * sweep of the table takes a few seconds instead of one and a half --
+     * unnoticeable for something the player did outside the game a moment
+     * ago. */
     {
-        enum { NOTICE_PER_TICK = 8 };
+        enum { NOTICE_PER_TICK = 8, NOTICE_PERIOD = 4 };
         static int cursor = 1;
+        if ((frames % NOTICE_PERIOD) == 0u) {
         int changed = 0;
         for (int n = 0; n < NOTICE_PER_TICK; n++) {
             if (cursor > CARD_COUNT) cursor = 1;
             const int id = cursor++;
             if (s_packs[id] && s_packs[id]->present) continue;
             char path[1200];
-            struct stat st;
             pack_path(id, NULL, path, sizeof path);
-            int found = stat(path, &st) == 0;
+            int found = psx_path_exists_utf8(path);
             for (int k = 1; !found && k < 4; k++) {
                 art_path(id, k, path, sizeof path);
                 found = file_mtime(path) != 0;
@@ -2326,6 +2399,7 @@ static void card_packs_tick(void)
          * above within a second; this loop only needs to react to what it
          * itself just found. */
         if (changed) rebuild_password_table();
+        }
     }
     assert_ram();
 }

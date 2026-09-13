@@ -47,15 +47,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+#include "psx_textfile.h"      /* psx_fopen_utf8/psx_mkdir_utf8/psx_path_exists_utf8:
+                                * the pack folder or Windows username may have an accent
+                                * the ANSI-code-page APIs cannot spell */
 
-#ifdef _WIN32
-#  include <direct.h>
-#  define TX_MKDIR(p) _mkdir(p)
-#else
-#  include <unistd.h>
-#  define TX_MKDIR(p) mkdir((p), 0755)
-#endif
+#define TX_MKDIR(p) psx_mkdir_utf8(p)
 
 #include "psx_wa_catalog.h"
 #include "texture_pack.h"
@@ -146,7 +142,7 @@ static int write_png_rgba(const char *path, const uint8_t *rgba, int w, int h)
     }
     be32(z + p, adler32_run(raw, raw_len)); p += 4;
 
-    FILE *f = fopen(path, "wb");
+    FILE *f = psx_fopen_utf8(path, "wb");
     if (!f) { free(z); free(raw); return 0; }
 
     uint8_t ihdr[13];
@@ -170,8 +166,7 @@ static int write_png_rgba(const char *path, const uint8_t *rgba, int w, int h)
 /* ---- paths ---------------------------------------------------------------- */
 static int exists(const char *path)
 {
-    struct stat st;
-    return stat(path, &st) == 0;
+    return psx_path_exists_utf8(path);
 }
 
 /* mkdir -p, in place, on a path that uses '/'. */
@@ -370,7 +365,7 @@ static void write_screens(const char *root, const char *name,
             continue;
 
         memset(canvas, 0, (size_t)cw * (size_t)chh * 4u);
-        FILE *mf = fopen(mp, "wb");
+        FILE *mf = psx_fopen_utf8(mp, "wb");
         if (mf)
             fprintf(mf, "# canvas %dx%d at screen %d,%d of %s\n"
                         "# src_x src_y w h  canvas_x canvas_y  cluthash\n",

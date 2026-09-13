@@ -1488,11 +1488,11 @@ static int s_reload_id;
  * The menu callback does nothing but flip a flag and arm the rebuild.
  *
  * It used to reload all 722 packs inline, which crashed on the way OUT of HD
- * mode. Enabling and disabling are not symmetric: enabling mostly CLEARS
- * overrides, while disabling re-reads, re-quantises and re-installs one for
- * every card that has art -- far more disc and guest work. Doing that from a
- * menu callback is the bug either way; the asymmetry is only why one
- * direction survived it.
+ * mode -- reloading 722 cards' ini/effects/deck state synchronously from a
+ * menu callback was the bug regardless of what catalog_tick()'s rebuild
+ * comment above says the rebuild is FOR (that part is now stale -- see
+ * there); reading all that state back in still costs real disc and guest
+ * work per card and still cannot safely happen inline from a callback.
  *
  * Every other option in this game sets a variable and returns (see
  * card_name_color_enabled_changed). The work belongs on the emulation thread,
@@ -1525,11 +1525,17 @@ static void reload_pack_activate(void)
 /*
  * Rebuild the disc-side card packs after the HD toggle moved.
  *
- * Necessary because build_disc_side() asks texpack_enabled() to decide who
- * owns card art, and that answer has just changed. Without the rebuild,
- * turning HD off would leave the card manager's art still suppressed and the
- * player would get stock art from both paths at once.
- */
+ * Stale as of 2026-09-13: build_disc_side() (psx_card_packs.c) no longer
+ * calls texpack_enabled() at all -- there is no more quantized disc-side
+ * fallback for it to choose between, only "stock unless a shared file
+ * exists", which does not change when the toggle does. texpack_enabled() is
+ * consulted directly inside texture_pack.c's own resolve path instead (what
+ * the raw VRAM injector actually substitutes at draw time), which is where
+ * turning HD off or on takes effect now.
+ *
+ * This sweep is therefore not doing anything the toggle still needs -- kept
+ * for now rather than removed mid-review; see the flagged follow-up to
+ * confirm and drop it. */
 static void catalog_tick(void)
 {
     if (!psx_mod_game_started())

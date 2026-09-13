@@ -49,6 +49,9 @@
 #include <time.h>               /* scan_dir()'s wall-clock budget */
 
 #include "mod_plugins.h"        /* psx_mod_player_data_dir */
+#include "psx_textfile.h"       /* psx_fopen_utf8/psx_mkdir_utf8/psx_dir_list_utf8: the
+                                 * player's pack folder or Windows username may have an
+                                 * accent the ANSI-code-page APIs cannot spell */
 /* The stb implementation lives in psx_window_icon.cpp and is built with
  * STBI_NO_STDIO, so the filename-based stbi_load() does not exist -- only
  * stbi_load_from_memory(). These defines must match that TU or the
@@ -59,16 +62,11 @@
 #define STBI_ONLY_PNG
 #include "../psxrecomp/runtime/third_party/stb_image.h"
 
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <windows.h>
-#  include <direct.h>
-#  define TP_MKDIR(p) _mkdir(p)
-#else
-#  include <dirent.h>
-#  include <sys/stat.h>
-#  define TP_MKDIR(p) mkdir((p), 0755)
-#endif
+/* mkdir is the only OS call left directly in this file -- everything that
+ * touches a FILE* or walks a directory goes through psx_textfile.h instead,
+ * so a non-ASCII pack path or player folder name is handled once, not once
+ * per caller. */
+#define TP_MKDIR(p) psx_mkdir_utf8(p)
 
 #define TP_MAX_ASSETS   4096
 #define TP_MAX_REGIONS   256
@@ -325,14 +323,6 @@ static TpRegion s_region[TP_MAX_REGIONS];
 static int      s_region_n;
 static unsigned s_generation = 1;
 
-/* Bumped ONLY when the active pack's file list is (re)scanned (activation or
- * a manual reload) -- see reload_pack_files(). s_generation above is not a
- * substitute: it also bumps on every single VRAM upload and draw-cache
- * invalidation (many times a frame), so a caller that wants "the pack just
- * became ready, re-check what it has" needs its own, far coarser counter.
- * texpack_file_scan_generation() exposes it. */
-static unsigned s_file_scan_gen;
-
 /* ---- pack files and loaded entries ---------------------------------------- */
 typedef struct {
     char name[TP_NAME_MAX];     /* pack-relative, no extension */
@@ -388,10 +378,42 @@ static const uint16_t *s_vram;
 /* atlas shelf allocator */
 static int s_shelf_x, s_shelf_y, s_shelf_h;
 
+/* entry_load() failures, remembered so a full atlas does not re-attempt the
+ * same decode+crop+pad work on every resolve. Reviewing the paired PR
+ * measured 60 refused loads/second sitting on ONE card: the atlas fills at
+ * ~90 4x-scaled card faces (4096x4096, ~410x386 padded each), and every
+ * primitive redraw invalidates texpack_on_draw()'s own TpCache (its `gen`
+ * check trips on essentially every frame, since the game uploads/
+ * invalidates SOME VRAM region most frames) -- so without this, a full pack
+ * past capacity re-decodes and re-fails every single frame for every
+ * primitive still trying to show art that will never fit. Keyed the same
+ * way s_entry[]'s own dedup is (file, src_x, src_y); cleared whenever
+ * s_entry[] itself is (a real reload, or an eviction -- see
+ * atlas_evict_all() below), since a failure under the OLD atlas may
+ * legitimately succeed under a cleared one. */
+#define TP_MAX_FAILED 4096
+typedef struct { int file, src_x, src_y; } TpFailedKey;
+static TpFailedKey s_failed[TP_MAX_FAILED];
+static int         s_failed_n;
+
+static int failed_lookup(int file, int src_x, int src_y)
+{
+    for (int i = 0; i < s_failed_n; i++)
+        if (s_failed[i].file == file && s_failed[i].src_x == src_x && s_failed[i].src_y == src_y)
+            return 1;
+    return 0;
+}
+static void failed_remember(int file, int src_x, int src_y)
+{
+    if (s_failed_n < TP_MAX_FAILED)
+        s_failed[s_failed_n++] = (TpFailedKey){ file, src_x, src_y };
+}
+
 /* Why replacements were refused, for texpack_state_json(). */
 static unsigned s_stat_decode_fail;    /* PNG would not decode */
 static unsigned s_stat_scale_reject;   /* not a whole multiple of the source */
-static unsigned s_stat_atlas_full;     /* no room left in the atlas */
+static unsigned s_stat_atlas_full;     /* no room left in the atlas, even after eviction */
+static unsigned s_stat_atlas_evicted;  /* atlas cleared and rebuilt to make room */
 static unsigned s_stat_missing;        /* indexed, then deleted from disk */
 /* Draw-path counters. Region counts above come from UPLOADS, so they say
  * nothing about whether a draw ever resolved -- these do. */
@@ -700,6 +722,33 @@ static void add_file(const char *rel, const char *full)
 static int   s_scan_over_budget;
 static time_t s_scan_deadline;
 
+static void scan_dir(const char *root, const char *sub);
+
+/* One directory entry from psx_dir_list_utf8(), during a scan_dir() walk. */
+typedef struct { const char *root, *sub; } ScanDirCtx;
+
+static void scan_dir_entry(const char *name, int is_dir, void *ctx_)
+{
+    const ScanDirCtx *ctx = (const ScanDirCtx *)ctx_;
+    if (s_scan_over_budget)
+        return;
+    if (time(NULL) >= s_scan_deadline) { s_scan_over_budget = 1; return; }
+    char rel[TP_NAME_MAX];
+    if (ctx->sub && *ctx->sub) snprintf(rel, sizeof rel, "%s/%s", ctx->sub, name);
+    else                       snprintf(rel, sizeof rel, "%s", name);
+    if (is_dir) {
+        scan_dir(ctx->root, rel);
+        return;
+    }
+    size_t n = strlen(rel);
+    if (n > 4 && !strcmp(rel + n - 4, ".png")) {
+        char full[TP_PATH_MAX];
+        snprintf(full, sizeof full, "%s/%s", ctx->root, rel);
+        rel[n - 4] = '\0';
+        add_file(rel, full);
+    }
+}
+
 /* Walk a pack directory, recording every .png under it by its path relative to
  * the pack root and minus the extension -- which is exactly the name the title
  * registered, so lookup is a string compare and nothing has to agree on a
@@ -716,66 +765,8 @@ static void scan_dir(const char *root, const char *sub)
     else
         snprintf(dir, sizeof dir, "%s", root);
 
-#ifdef _WIN32
-    char glob[TP_PATH_MAX];
-    snprintf(glob, sizeof glob, "%s/*", dir);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(glob, &fd);
-    if (h == INVALID_HANDLE_VALUE)
-        return;
-    do {
-        if (s_scan_over_budget) break;
-        if (time(NULL) >= s_scan_deadline) { s_scan_over_budget = 1; break; }
-        const char *nm = fd.cFileName;
-        if (!strcmp(nm, ".") || !strcmp(nm, ".."))
-            continue;
-        char rel[TP_NAME_MAX];
-        if (sub && *sub) snprintf(rel, sizeof rel, "%s/%s", sub, nm);
-        else             snprintf(rel, sizeof rel, "%s", nm);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            scan_dir(root, rel);
-        } else {
-            size_t n = strlen(rel);
-            if (n > 4 && !strcmp(rel + n - 4, ".png")) {
-                char full[TP_PATH_MAX];
-                snprintf(full, sizeof full, "%s/%s", root, rel);
-                rel[n - 4] = '\0';
-                add_file(rel, full);
-            }
-        }
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-#else
-    DIR *dp = opendir(dir);
-    if (!dp)
-        return;
-    struct dirent *de;
-    while ((de = readdir(dp)) != NULL) {
-        if (s_scan_over_budget) break;
-        if (time(NULL) >= s_scan_deadline) { s_scan_over_budget = 1; break; }
-        const char *nm = de->d_name;
-        if (!strcmp(nm, ".") || !strcmp(nm, ".."))
-            continue;
-        char rel[TP_NAME_MAX];
-        if (sub && *sub) snprintf(rel, sizeof rel, "%s/%s", sub, nm);
-        else             snprintf(rel, sizeof rel, "%s", nm);
-        char full[TP_PATH_MAX];
-        snprintf(full, sizeof full, "%s/%s", root, rel);
-        struct stat st;
-        if (stat(full, &st) != 0)
-            continue;
-        if (S_ISDIR(st.st_mode)) {
-            scan_dir(root, rel);
-        } else {
-            size_t n = strlen(rel);
-            if (n > 4 && !strcmp(rel + n - 4, ".png")) {
-                rel[n - 4] = '\0';
-                add_file(rel, full);
-            }
-        }
-    }
-    closedir(dp);
-#endif
+    ScanDirCtx ctx = { root, sub };
+    psx_dir_list_utf8(dir, scan_dir_entry, &ctx);
 }
 
 /* One pack, always: <player-data>/textures, registered so psx_wa_catalog.c's
@@ -997,6 +988,13 @@ static void reload_pack_files(void)
     s_entry_n = 0;
     s_file_n = 0;
     s_shelf_x = s_shelf_y = s_shelf_h = 0;
+    /* s_failed[] is keyed by file INDEX, and s_file_n just reset to 0 above --
+     * scan_dir() below hands out fresh indices from scratch, so a stale
+     * entry here would silently blame whatever file happens to land on the
+     * same index next. A real reload is exactly the case a remembered
+     * failure should not survive anyway (the files on disk may well have
+     * changed). */
+    s_failed_n = 0;
     s_generation++;
     if (s_pack_active >= 0) {
         s_scan_over_budget = 0;
@@ -1004,8 +1002,8 @@ static void reload_pack_files(void)
         scan_dir(s_pack_path[s_pack_active], NULL);
         s_stat_decode_fail = s_stat_scale_reject = s_stat_atlas_full = 0;
         s_stat_missing = 0;
+        s_stat_atlas_evicted = 0;
     }
-    s_file_scan_gen++;
 }
 
 /* Reloading walks the pack directory and frees decoded art, so it must not run
@@ -1301,15 +1299,6 @@ static int find_file(const char *name)
     return -1;
 }
 
-int texpack_has_replacement(const char *name)
-{
-    if (!s_enabled || s_pack_active < 0 || !name || !*name)
-        return 0;
-    return find_file(name) >= 0;
-}
-
-unsigned texpack_file_scan_generation(void) { return s_file_scan_gen; }
-
 static int atlas_place(int w, int h, int *ox, int *oy)
 {
     if (w > TP_ATLAS_DIM || h > TP_ATLAS_DIM)
@@ -1335,7 +1324,7 @@ static int atlas_place(int w, int h, int *ox, int *oy)
 
 static stbi_uc *load_png(const char *path, int *w, int *h, int *comp)
 {
-    FILE *f = fopen(path, "rb");
+    FILE *f = psx_fopen_utf8(path, "rb");
     if (!f) {
         /* Indexed at scan time, gone now. Counted apart from a decode failure
          * because the two mean opposite things: one is a broken PNG, the other
@@ -1357,6 +1346,31 @@ static stbi_uc *load_png(const char *path, int *w, int *h, int *comp)
     return px;
 }
 
+/* Frees every currently-loaded atlas entry and resets the shelf allocator to
+ * empty, so entry_load() can retry a placement that just failed for want of
+ * room. Called only from there, only when atlas_place() has already failed
+ * once for a genuinely new entry -- not a bug fix so much as accepting a
+ * real capacity limit (TP_ATLAS_DIM square, and a full 722-card set at a
+ * meaningful upscale simply does not fit resident at once) without the
+ * consequence being "everything past whatever fit first shows stock
+ * forever". Bumping s_generation invalidates every texpack_on_draw() TpCache
+ * slot that pointed at a now-freed atlas_x/atlas_y, so nothing samples freed
+ * memory or a stale placement -- the next resolve for anything still being
+ * drawn reloads it fresh into the emptied atlas. Costs one atlas rebuild's
+ * worth of stutter for whatever is on screen at the time, not a permanent
+ * loss, and only happens at all for a pack big enough to actually exceed
+ * capacity. */
+static void atlas_evict_all(void)
+{
+    for (int i = 0; i < s_entry_n; i++)
+        free(s_entry[i].rgba);
+    s_entry_n = 0;
+    s_shelf_x = s_shelf_y = s_shelf_h = 0;
+    s_failed_n = 0;
+    s_generation++;
+    s_stat_atlas_evicted++;
+}
+
 /* Load a file as the replacement for asset `a`. Returns an entry index, or -1.
  *
  * The file on disk is DISPLAY layout (a->disp_w x a->disp_h). For a raw asset
@@ -1373,13 +1387,23 @@ static int entry_load(int file, const TpAsset *a)
         if (s_entry[i].file == file &&
             s_entry[i].src_x == a->src_x && s_entry[i].src_y == a->src_y)
             return i;
-    if (s_entry_n >= TP_MAX_ENTRIES)
+    /* A remembered failure short-circuits every one of the checks below --
+     * see s_failed[]'s own comment for why this matters far more than it
+     * looks like it should: texpack_on_draw()'s TpCache does NOT protect
+     * against re-calling this function, because its own `gen` check trips
+     * on essentially every frame regardless of whether THIS asset changed. */
+    if (failed_lookup(file, a->src_x, a->src_y))
         return -1;
+    if (s_entry_n >= TP_MAX_ENTRIES) {
+        failed_remember(file, a->src_x, a->src_y);
+        return -1;
+    }
 
     int w = 0, h = 0, comp = 0;
     stbi_uc *px = load_png(s_file[file].path, &w, &h, &comp);
     if (!px) {
         s_stat_decode_fail++;
+        failed_remember(file, a->src_x, a->src_y);
         return -1;
     }
     /* Validate against the DISPLAY size -- that is what the file is. */
@@ -1387,6 +1411,7 @@ static int entry_load(int file, const TpAsset *a)
         w / a->disp_w != h / a->disp_h || w < a->disp_w) {
         s_stat_scale_reject++;      /* see the header on why fractional fails */
         stbi_image_free(px);
+        failed_remember(file, a->src_x, a->src_y);
         return -1;
     }
     const int scale = w / a->disp_w;
@@ -1398,7 +1423,11 @@ static int entry_load(int file, const TpAsset *a)
         pw = a->page_w * scale;
         ph = a->page_h * scale;
         page = (stbi_uc *)malloc((size_t)pw * (size_t)ph * 4u);
-        if (!page) { stbi_image_free(px); return -1; }
+        if (!page) {
+            stbi_image_free(px);
+            failed_remember(file, a->src_x, a->src_y);
+            return -1;
+        }
         a->retile(px, w, h, page, pw, ph);
         stbi_image_free(px);
     }
@@ -1417,11 +1446,13 @@ static int entry_load(int file, const TpAsset *a)
         if (sx + aw > pw || sy + ah > ph) {
             if (a->retile) free(page); else stbi_image_free(page);
             s_stat_scale_reject++;
+            failed_remember(file, a->src_x, a->src_y);
             return -1;
         }
         atlas_px = (stbi_uc *)malloc((size_t)aw * (size_t)ah * 4u);
         if (!atlas_px) {
             if (a->retile) free(page); else stbi_image_free(page);
+            failed_remember(file, a->src_x, a->src_y);
             return -1;
         }
         for (int y = 0; y < ah; y++)
@@ -1438,6 +1469,7 @@ static int entry_load(int file, const TpAsset *a)
     uint8_t *padded = (uint8_t *)malloc((size_t)paw * (size_t)pah * 4u);
     if (!padded) {
         if (atlas_is_stbi) stbi_image_free(atlas_px); else free(atlas_px);
+        failed_remember(file, a->src_x, a->src_y);
         return -1;
     }
     for (int y = 0; y < ah; y++)
@@ -1459,9 +1491,19 @@ static int entry_load(int file, const TpAsset *a)
 
     int ax, ay;
     if (!atlas_place(paw, pah, &ax, &ay)) {
-        s_stat_atlas_full++;
-        free(padded);
-        return -1;
+        /* Genuinely out of room at the CURRENT contents, not just this one
+         * entry being oversized -- clear everything and let whatever is
+         * still on screen reload into the freed space. Only tried once: if
+         * a single freshly-emptied atlas still can't fit this entry, no
+         * further eviction will either (it did not fit alone), so remember
+         * the failure and stop hammering it every frame. */
+        atlas_evict_all();
+        if (!atlas_place(paw, pah, &ax, &ay)) {
+            s_stat_atlas_full++;
+            free(padded);
+            failed_remember(file, a->src_x, a->src_y);
+            return -1;
+        }
     }
 
     TpEntry *e = &s_entry[s_entry_n];
@@ -2124,7 +2166,7 @@ int texpack_state_json(char *out, unsigned cap)
         "\"runs\":{\"max_h\":%d,\"tall\":%u,\"tall_matched\":%u,"
         "\"hash\":\"%016llx\",\"x\":%d,\"y\":%d},"
         "\"refused\":{\"decode\":%u,\"scale\":%u,\"atlas_full\":%u,"
-        "\"missing\":%u},\"unres\":[",
+        "\"atlas_evicted\":%u,\"missing\":%u},\"unres\":[",
         s_enabled, s_pack_n, s_pack_active, pack, s_file_n,
         s_asset_n, s_region_n, s_entry_n,
         s_stat_uploads, s_stat_matched,
@@ -2137,7 +2179,7 @@ int texpack_state_json(char *out, unsigned cap)
         s_bld_max_h, s_bld_tall_runs, s_bld_tall_matched,
         (unsigned long long)s_bld_tall_hash, s_bld_tall_x, s_bld_tall_y,
         s_stat_decode_fail, s_stat_scale_reject, s_stat_atlas_full,
-        s_stat_missing);
+        s_stat_atlas_evicted, s_stat_missing);
     if (n >= cap)
         return 0;
 
@@ -2205,4 +2247,34 @@ int texpack_state_json(char *out, unsigned cap)
         n += k;
     }
     return (unsigned)snprintf(out + n, cap - n, "]") < cap - n;
+}
+
+/* ---- runtime hook registration ---------------------------------------- */
+/* See gpu_texpack_hooks.h's own header comment for why this exists: the
+ * runtime used to #include "texture_pack.h" directly and call
+ * texpack_on_upload/on_draw/take_pending/set_vram/invalidate_rect/
+ * note_copy/atlas_dim/debug_note_prim by name, which only exist in this
+ * file -- compiled only when this title's game C is present
+ * (YGOFM_HAS_GAME_C in the superproject's CMakeLists.txt). A build without
+ * it (the release setup host, or any other title linking this runtime)
+ * failed to link. Registering through gpu_texpack_hooks.h's table instead
+ * -- the same pattern psx_game_hooks.h already uses for start/frame/vblank
+ * work -- means the runtime never names a single one of these symbols
+ * directly, and a build with no game C link cleanly (the table just never
+ * gets filled in, so gpu_texpack_on_draw() and friends report "no
+ * replacement" and everything else no-ops). Found reviewing the paired PR,
+ * 2026-09-14. */
+PSX_MOD_CONSTRUCTOR(texture_pack_install_hooks)
+{
+    static const GpuTexpackHooks hooks = {
+        .set_vram        = texpack_set_vram,
+        .on_upload       = texpack_on_upload,
+        .on_draw         = texpack_on_draw,
+        .invalidate_rect = texpack_invalidate_rect,
+        .note_copy       = texpack_note_copy,
+        .atlas_dim       = texpack_atlas_dim,
+        .take_pending    = texpack_take_pending,
+        .debug_note_prim = texpack_debug_note_prim,
+    };
+    gpu_texpack_set_hooks(&hooks);
 }

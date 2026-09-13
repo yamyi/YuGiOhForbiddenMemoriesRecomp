@@ -1806,13 +1806,13 @@ static int install_pick(const char *src, int kind)
     while ((got = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, got, out);
     fclose(in); fclose(out);
     /* Arm the raw VRAM injector on this same folder (a no-op if it already
-     * is) and ask it to re-read its files: the pick above just wrote a new
-     * one, and without this the injector's cached listing would not know it
-     * exists until something else happened to trigger a rescan. This is
-     * what lets the picture show at full resolution instead of stock (see
-     * build_disc_side() in psx_card_packs.c) -- deliberately only done here
-     * and on the Textures page opening, both explicit player actions, not
-     * at boot. */
+     * is -- the default pack is already active from boot, see
+     * discover_packs()/build_catalog()) and ask it to re-read its files: the
+     * pick above just wrote a new one, and without this the injector's
+     * cached listing would not know it exists until something else happened
+     * to trigger a rescan. This is what lets the picture show at full
+     * resolution instead of stock (see build_disc_side() in
+     * psx_card_packs.c). */
     char root[1024];
     texpack_active_dir(root, sizeof root);
     texpack_set_active_dir(root);
